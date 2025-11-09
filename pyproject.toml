@@ -16,9 +16,19 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pre-commit>=4.4.0",
+    "pytest>=9.0.0",
     "ruff>=0.14.4",
     "ty>=0.0.1a25",
 ]
+
+
+[build-system]
+requires = ["uv_build>=0.9.8,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "openbb_pydantic_ai"
+module-root = ""
 
 
 [tool.ruff.lint]
@@ -31,4 +41,9 @@ select = [
 ]
 ignore = [
     "S101", # ignore assert statements being used (for pytest)
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    ".",
 ]
