@@ -1,0 +1,34 @@
+[project]
+name = "openbb-pydantic-ai"
+version = "0.1.0"
+description = "Pydantic AI adapter for OpenBB SDK. Enables connettion any pydantic-ai agent to the OpenBB Workspace."
+authors = [
+    { name = "Magnus Samuelsen" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openbb-ai>=1.7.6",
+    "pydantic-ai-slim>=1.12.0",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.4.0",
+    "ruff>=0.14.4",
+    "ty>=0.0.1a25",
+]
+
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle
+    "F", # pyflakes
+    "B", # flake8-bugbear
+    "I", # isort
+    "S", # security / flake8-bandit
+]
+ignore = [
+    "S101", # ignore assert statements being used (for pytest)
+]
