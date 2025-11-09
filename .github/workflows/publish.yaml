@@ -1,0 +1,82 @@
+name: Publish
+
+on:
+  # Publish when you push a tag like v0.3.0, v1.0.0, etc.
+  push:
+    tags:
+      - v*
+
+jobs:
+  publish:
+    name: Build & Publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write   # REQUIRED for PyPI trusted publishing (OIDC)
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Optional: if you want to pin the build interpreter version,
+      # this does NOT affect the version of your package, only the build env.
+      - name: Install Python for build
+        run: uv python install 3.14
+
+      # Extract version from pyproject.toml and ensure it matches the tag (vX.Y.Z)
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          uv run python - << 'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          pyproject_path = Path("pyproject.toml")
+          data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+          version = data.get("project", {}).get("version")
+          if not version:
+              raise SystemExit("No [project].version found in pyproject.toml")
+
+          print(f"version from pyproject.toml: {version}")
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as f:
+              f.write(f"version={version}\n")
+          PY
+
+      - name: Validate tag matches pyproject version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo "TAG=${TAG}"
+          echo "VERSION=${VERSION}"
+
+          if [ "v${VERSION}" != "${TAG}" ]; then
+            echo "Tag (${TAG}) does not match pyproject.toml version (v${VERSION})"
+            exit 1
+          fi
+
+          echo "Tag (${TAG}) matches pyproject.toml version (v${VERSION})."
+
+      - name: Build (sdist + wheel)
+        run: uv build
+
+      # Optional but recommended: smoke test the built wheel
+      # Provide tests/smoke_test.py, e.g. just "import your_package"
+      - name: Smoke test (wheel)
+        run: uv run --isolated --no-project --with dist/*.whl tests/smoke_test.py
+
+      - name: Smoke test (source distribution)
+        run: uv run --isolated --no-project --with dist/*.tar.gz tests/smoke_test.py
+
+      - name: Publish to PyPI (trusted publishing)
+        run: uv publish
