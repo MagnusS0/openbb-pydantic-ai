@@ -35,10 +35,10 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
-from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.ui import UIEventStream
 
 from ._config import GET_WIDGET_DATA_TOOL_NAME
+from ._dependencies import OpenBBDeps
 from ._event_stream_components import (
     CitationCollector,
     ThinkingBuffer,
@@ -62,7 +62,7 @@ def _encode_sse(event: SSE) -> str:
 
 
 @dataclass
-class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
+class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     """Transform native Pydantic AI events into OpenBB SSE events."""
 
     widget_registry: WidgetRegistry = field(default_factory=WidgetRegistry)
@@ -308,16 +308,16 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
             citation = cite(call_info.widget, call_info.args)
             self._citations.add(citation)
 
-            for event in self._widget_result_events(call_info, result_part.content):
-                yield event
+            for sse in self._widget_result_events(call_info, result_part.content):
+                yield sse
             return
 
-        for event in handle_generic_tool_result(
+        for sse in handle_generic_tool_result(
             call_info,
             result_part.content,
             mark_streamed_text=self._record_text_streamed,
         ):
-            yield event
+            yield sse
 
     async def after_stream(self) -> AsyncIterator[SSE]:
         if not self._thinking.is_empty():

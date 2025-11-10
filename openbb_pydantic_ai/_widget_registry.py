@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from openbb_ai.models import (
@@ -16,6 +16,8 @@ from ._config import GET_WIDGET_DATA_TOOL_NAME
 if TYPE_CHECKING:
     from pydantic_ai.toolsets import FunctionToolset
 
+    from ._dependencies import OpenBBDeps
+
 
 class WidgetRegistry:
     """Centralized registry for widget discovery and lookup."""
@@ -23,7 +25,7 @@ class WidgetRegistry:
     def __init__(
         self,
         collection: WidgetCollection | None = None,
-        toolsets: list[FunctionToolset] | None = None,
+        toolsets: Sequence[FunctionToolset[OpenBBDeps]] | None = None,
     ):
         """Initialize widget registry from collection and toolsets.
 
@@ -31,8 +33,8 @@ class WidgetRegistry:
         ----------
         collection : WidgetCollection | None
             Widget collection with priority groups
-        toolsets : list[FunctionToolset] | None
-            List of widget toolsets
+        toolsets : Sequence[FunctionToolset[OpenBBDeps]] | None
+            Widget toolsets
         """
         self._by_tool_name: dict[str, Widget] = {}
         self._by_uuid: dict[str, Widget] = {}

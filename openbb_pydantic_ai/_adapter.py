@@ -102,11 +102,16 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         base = list(messages)
         pending: list[LlmClientFunctionCallResultMessage] = []
 
-        # Only split results that come after the last AI message
-        # Results followed by AI messages were already processed
-        while base and isinstance(base[-1], LlmClientFunctionCallResultMessage):
-            result_msg = base.pop()
-            pending.insert(0, cast(LlmClientFunctionCallResultMessage, result_msg))
+        # Treat only the trailing tool results (those after the final assistant
+        # message) as pending. Leave them in the base history so the next model
+        # call still sees the complete tool call/result exchange.
+        idx = len(base) - 1
+        while idx >= 0:
+            message = base[idx]
+            if not isinstance(message, LlmClientFunctionCallResultMessage):
+                break
+            pending.insert(0, cast(LlmClientFunctionCallResultMessage, message))
+            idx -= 1
 
         return base, pending
 
@@ -131,6 +136,12 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         if not self._pending_results:
             return None
 
+        # When those trailing results already sit in the base history, skip
+        # emitting DeferredToolResults; resending them would show up as a
+        # conflicting duplicate tool response upstream.
+        if self._pending_results_are_in_history():
+            return None
+
         results = DeferredToolResults()
         for message in self._pending_results:
             actual_id = self._tool_call_id_from_result(message)
@@ -138,8 +149,20 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             results.calls[actual_id] = serialized
         return results
 
+    def _pending_results_are_in_history(self) -> bool:
+        if not self._pending_results:
+            return False
+        pending_len = len(self._pending_results)
+        if pending_len > len(self._base_messages):
+            return False
+        tail = self._base_messages[-pending_len:]
+        return all(
+            orig is pending
+            for orig, pending in zip(tail, self._pending_results, strict=True)
+        )
+
     @cached_property
-    def _widget_toolsets(self) -> list[FunctionToolset]:
+    def _widget_toolsets(self) -> tuple[FunctionToolset[OpenBBDeps], ...]:
         return build_widget_toolsets(self.run_input.widgets)
 
     def build_event_stream(self) -> OpenBBAIEventStream:
@@ -191,13 +214,14 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             builder.add(SystemPromptPart(content="\n".join(lines)))
 
     @cached_property
-    def toolset(self) -> AbstractToolset | None:
+    def toolset(self) -> AbstractToolset[OpenBBDeps] | None:
         """Build combined toolset from widget toolsets."""
         if not self._widget_toolsets:
             return None
         if len(self._widget_toolsets) == 1:
             return self._widget_toolsets[0]
-        return CombinedToolset(self._widget_toolsets)
+        combined = CombinedToolset(self._widget_toolsets)
+        return cast(AbstractToolset[OpenBBDeps], combined)
 
     @cached_property
     def state(self) -> dict[str, Any] | None:
