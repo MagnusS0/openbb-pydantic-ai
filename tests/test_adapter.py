@@ -9,7 +9,7 @@ from openbb_ai.models import (
     LlmClientMessage,
     RoleEnum,
 )
-from pydantic_ai.messages import SystemPromptPart, ToolCallPart
+from pydantic_ai.messages import SystemPromptPart, ToolCallPart, ToolReturnPart
 
 from openbb_pydantic_ai import OpenBBAIAdapter, build_widget_tool_name
 
@@ -67,6 +67,12 @@ def test_adapter_preserves_tool_call_ids(widget_collection, make_request):
     ]
     assert tool_parts and tool_parts[0].tool_call_id == "tool-123"
 
-    deferred = adapter.deferred_tool_results
-    assert deferred is not None
-    assert deferred.calls["tool-123"]["input_arguments"]["symbol"] == "AAPL"
+    return_parts = [
+        part
+        for message in adapter.messages
+        for part in getattr(message, "parts", [])
+        if isinstance(part, ToolReturnPart)
+    ]
+    assert return_parts and return_parts[0].tool_call_id == "tool-123"
+
+    assert adapter.deferred_tool_results is None

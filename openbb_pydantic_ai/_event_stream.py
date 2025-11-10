@@ -3,35 +3,29 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
-from uuid import uuid4
+from typing import Any
 
 from openbb_ai.helpers import (
-    chart,
     citations,
     cite,
     get_widget_data,
     message_chunk,
     reasoning_step,
-    table,
 )
 from openbb_ai.models import (
     SSE,
-    Citation,
-    ClientArtifact,
     LlmClientFunctionCallResultMessage,
     MessageArtifactSSE,
     MessageChunkSSE,
     QueryRequest,
     StatusUpdateSSE,
-    StatusUpdateSSEData,
-    Widget,
     WidgetRequest,
 )
 from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import (
+    FunctionToolCallEvent,
     FunctionToolResultEvent,
     RetryPromptPart,
     TextPart,
@@ -41,16 +35,25 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
-from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.ui import UIEventStream
 
-from ._utils import (
-    GET_WIDGET_DATA_TOOL_NAME,
-    get_str,
-    get_str_list,
-    normalize_args,
-    parse_json_content,
+from ._config import GET_WIDGET_DATA_TOOL_NAME
+from ._dependencies import OpenBBDeps
+from ._event_stream_components import (
+    CitationCollector,
+    ThinkingBuffer,
+    ToolCallTracker,
 )
+from ._event_stream_helpers import (
+    ToolCallInfo,
+    artifact_from_output,
+    extract_widget_args,
+    handle_generic_tool_result,
+    serialized_content_from_result,
+    tool_result_events_from_content,
+)
+from ._utils import format_args, normalize_args
+from ._widget_registry import WidgetRegistry
 
 
 def _encode_sse(event: SSE) -> str:
@@ -59,25 +62,31 @@ def _encode_sse(event: SSE) -> str:
 
 
 @dataclass
-class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
+class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     """Transform native Pydantic AI events into OpenBB SSE events."""
 
-    widget_lookup: Mapping[str, Widget] = field(default_factory=dict)
+    widget_registry: WidgetRegistry = field(default_factory=WidgetRegistry)
+    """Registry for widget lookup and discovery."""
     pending_results: list[LlmClientFunctionCallResultMessage] = field(
         default_factory=list
     )
 
-    _pending_tool_calls: dict[str, tuple[Widget, dict[str, Any]]] = field(
-        init=False, default_factory=dict
-    )
+    # State management components
+    _tool_calls: ToolCallTracker = field(init=False, default_factory=ToolCallTracker)
+    _citations: CitationCollector = field(init=False, default_factory=CitationCollector)
+    _thinking: ThinkingBuffer = field(init=False, default_factory=ThinkingBuffer)
+
+    # Simple state flags
     _has_streamed_text: bool = field(init=False, default=False)
     _final_output_pending: str | None = field(init=False, default=None)
-    _thinking_buffer: list[str] = field(init=False, default_factory=list)
     _deferred_results_emitted: bool = field(init=False, default=False)
-    _pending_citations: list[Citation] = field(init=False, default_factory=list)
 
     def encode_event(self, event: SSE) -> str:
         return _encode_sse(event)
+
+    def _record_text_streamed(self) -> None:
+        """Record that text content has been streamed to the client."""
+        self._has_streamed_text = True
 
     async def before_stream(self) -> AsyncIterator[SSE]:
         """Emit tool results for any deferred results provided upfront."""
@@ -95,69 +104,30 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
         self, result_message: LlmClientFunctionCallResultMessage
     ) -> AsyncIterator[SSE]:
         """Process a single deferred result message and yield SSE events."""
-        widget = self._find_widget_for_result(result_message)
+        widget = self.widget_registry.find_for_result(result_message)
 
-        if widget is None:
-            return
+        widget_args = extract_widget_args(result_message)
+        content = serialized_content_from_result(result_message)
+        call_info = ToolCallInfo(
+            tool_name=result_message.function,
+            args=widget_args,
+            widget=widget,
+        )
 
-        # Collect citation for later emission
-        widget_args = self._extract_widget_args(result_message)
-        citation = cite(widget, widget_args)
-        self._pending_citations.append(citation)
-
-        # Serialize and emit tool result events
-        content = self._serialize_result_message(result_message)
-        for event in self._tool_result_events_from_content(content):
-            yield event
-
-    def _find_widget_for_result(
-        self, result_message: LlmClientFunctionCallResultMessage
-    ) -> Widget | None:
-        """Find the widget associated with a result message."""
-        # Check if this is a direct widget tool result
-        widget = self.widget_lookup.get(result_message.function)
         if widget is not None:
-            return widget
+            citation = cite(widget, widget_args)
+            self._citations.add(citation)
+        else:
+            details = format_args(widget_args)
+            yield reasoning_step(
+                f"Received result for '{result_message.function}' "
+                "without widget metadata",
+                details=details if details else None,
+                event_type="WARNING",
+            )
 
-        # Check if it's a get_widget_data call with data_sources
-        if result_message.function == GET_WIDGET_DATA_TOOL_NAME:
-            data_sources = result_message.input_arguments.get("data_sources", [])
-            if data_sources:
-                data_source = data_sources[0]
-                widget_uuid = data_source.get("widget_uuid")
-                # Find widget by UUID in the lookup
-                for w in self.widget_lookup.values():
-                    if str(w.uuid) == widget_uuid:
-                        return w
-
-        return None
-
-    def _extract_widget_args(
-        self, result_message: LlmClientFunctionCallResultMessage
-    ) -> dict[str, Any]:
-        """Extract widget arguments from a result message."""
-        if result_message.function == GET_WIDGET_DATA_TOOL_NAME:
-            data_sources = result_message.input_arguments.get("data_sources", [])
-            if data_sources:
-                return data_sources[0].get("input_args", {})
-        return result_message.input_arguments
-
-    def _serialize_result_message(
-        self, result_message: LlmClientFunctionCallResultMessage
-    ) -> dict[str, Any]:
-        """Serialize a result message into a content dictionary."""
-        content = {
-            "input_arguments": result_message.input_arguments,
-            "data": [
-                item.model_dump(mode="json", exclude_none=True)
-                if hasattr(item, "model_dump")
-                else item
-                for item in result_message.data
-            ],
-        }
-        if result_message.extra_state:
-            content["extra_state"] = result_message.extra_state
-        return content
+        for event in self._widget_result_events(call_info, content):
+            yield event
 
     async def on_error(self, error: Exception) -> AsyncIterator[SSE]:
         yield reasoning_step(str(error), event_type="ERROR")
@@ -166,12 +136,12 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
         self, part: TextPart, follows_text: bool = False
     ) -> AsyncIterator[SSE]:
         if part.content:
-            self._has_streamed_text = True
+            self._record_text_streamed()
             yield message_chunk(part.content)
 
     async def handle_text_delta(self, delta: TextPartDelta) -> AsyncIterator[SSE]:
         if delta.content_delta:
-            self._has_streamed_text = True
+            self._record_text_streamed()
             yield message_chunk(delta.content_delta)
 
     async def handle_thinking_start(
@@ -179,9 +149,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
         part: ThinkingPart,
         follows_thinking: bool = False,
     ) -> AsyncIterator[SSE]:
-        self._thinking_buffer = []
+        self._thinking.clear()
         if part.content:
-            self._thinking_buffer.append(part.content)
+            self._thinking.append(part.content)
         return
         yield  # pragma: no cover
 
@@ -190,7 +160,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
         delta: ThinkingPartDelta,
     ) -> AsyncIterator[SSE]:
         if delta.content_delta:
-            self._thinking_buffer.append(delta.content_delta)
+            self._thinking.append(delta.content_delta)
         return
         yield  # pragma: no cover
 
@@ -199,15 +169,15 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
         part: ThinkingPart,
         followed_by_thinking: bool = False,
     ) -> AsyncIterator[SSE]:
-        content = part.content or "".join(self._thinking_buffer)
-        if not content and self._thinking_buffer:
-            content = "".join(self._thinking_buffer)
+        content = part.content or self._thinking.get_content()
+        if not content and not self._thinking.is_empty():
+            content = self._thinking.get_content()
 
         if content:
             details = {"Thinking": content}
             yield reasoning_step("Thinking", details=details)
 
-        self._thinking_buffer.clear()
+        self._thinking.clear()
 
     async def handle_run_result(
         self, event: AgentRunResultEvent[Any]
@@ -237,13 +207,18 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
         tool_call_ids: list[dict[str, Any]] = []
 
         for call in output.calls:
-            widget = self.widget_lookup.get(call.tool_name)
+            widget = self.widget_registry.find_by_tool_name(call.tool_name)
             if widget is None:
                 continue
 
             args = normalize_args(call.args)
             widget_requests.append(WidgetRequest(widget=widget, input_arguments=args))
-            self._pending_tool_calls[call.tool_call_id] = (widget, args)
+            self._tool_calls.register_call(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                args=args,
+                widget=widget,
+            )
             tool_call_ids.append(
                 {
                     "tool_call_id": call.tool_call_id,
@@ -256,7 +231,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
             details = {
                 "Origin": widget.origin,
                 "Widget Id": widget.widget_id,
-                **args,
+                **format_args(args),
             }
             yield reasoning_step(
                 f"Requesting widget '{widget.name}'",
@@ -267,6 +242,33 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
             sse = get_widget_data(widget_requests)
             sse.data.extra_state = {"tool_calls": tool_call_ids}
             yield sse
+
+    async def handle_function_tool_call(
+        self, event: FunctionToolCallEvent
+    ) -> AsyncIterator[SSE]:
+        """Surface non-widget tool calls as reasoning steps."""
+
+        part = event.part
+        tool_name = part.tool_name
+
+        is_widget_call = self.widget_registry.find_by_tool_name(tool_name)
+        if is_widget_call or tool_name == GET_WIDGET_DATA_TOOL_NAME:
+            return
+
+        tool_call_id = part.tool_call_id
+        if not tool_call_id or self._tool_calls.has_pending(tool_call_id):
+            return
+
+        args = normalize_args(part.args)
+        self._tool_calls.register_call(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=args,
+        )
+
+        formatted_args = format_args(args)
+        details = formatted_args if formatted_args else None
+        yield reasoning_step(f"Calling tool '{tool_name}'", details=details)
 
     async def handle_function_tool_result(
         self, event: FunctionToolResultEvent
@@ -297,24 +299,32 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
             yield result_part.content
             return
 
-        widget_info = self._pending_tool_calls.pop(tool_call_id, None)
-        if widget_info is None:
+        call_info = self._tool_calls.get_call_info(tool_call_id)
+        if call_info is None:
             return
 
-        widget, args = widget_info
-        # Collect citation for later emission (at the end)
-        citation = cite(widget, args)
-        self._pending_citations.append(citation)
+        if call_info.widget is not None:
+            # Collect citation for later emission (at the end)
+            citation = cite(call_info.widget, call_info.args)
+            self._citations.add(citation)
 
-        for event in self._tool_result_events_from_content(result_part.content):
-            yield event
+            for sse in self._widget_result_events(call_info, result_part.content):
+                yield sse
+            return
+
+        for sse in handle_generic_tool_result(
+            call_info,
+            result_part.content,
+            mark_streamed_text=self._record_text_streamed,
+        ):
+            yield sse
 
     async def after_stream(self) -> AsyncIterator[SSE]:
-        if self._thinking_buffer:
-            content = "".join(self._thinking_buffer)
+        if not self._thinking.is_empty():
+            content = self._thinking.get_content()
             if content:
                 yield reasoning_step(content)
-            self._thinking_buffer.clear()
+            self._thinking.clear()
 
         if self._final_output_pending and not self._has_streamed_text:
             yield message_chunk(self._final_output_pending)
@@ -322,183 +332,32 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
         self._final_output_pending = None
 
         # Emit all citations at the end
-        if self._pending_citations:
-            yield citations(self._pending_citations)
-            self._pending_citations.clear()
+        if self._citations.has_citations():
+            yield citations(self._citations.get_all())
+            self._citations.clear()
 
         return
         yield  # pragma: no cover
 
-    def _tool_result_events_from_content(self, content: Any) -> list[SSE]:
-        """Transform tool result content into SSE events."""
-        if not isinstance(content, dict):
-            return []
-
-        data_entries = content.get("data") or []
-        if not isinstance(data_entries, list):
-            return []
-
-        events: list[SSE] = []
-        artifacts: list[ClientArtifact] = []
-
-        for entry in data_entries:
-            if not isinstance(entry, dict):
-                continue
-
-            # Process command results (status messages)
-            command_event = self._process_command_result(entry)
-            if command_event:
-                events.append(command_event)
-
-            # Process data items
-            entry_artifacts, entry_events = self._process_data_items(entry)
-            artifacts.extend(entry_artifacts)
-            events.extend(entry_events)
-
-        # Emit collected artifacts as a reasoning step
-        if artifacts:
-            events.append(self._reasoning_with_artifacts("Data retrieved", artifacts))
-
-        return events
-
-    @staticmethod
-    def _reasoning_with_artifacts(
-        message: str, artifacts: list[ClientArtifact]
-    ) -> StatusUpdateSSE:
-        """Emit a reasoning step that carries artifacts inline for UI grouping."""
-
-        return StatusUpdateSSE(
-            data=StatusUpdateSSEData(
-                eventType="INFO",
-                message=message,
-                artifacts=artifacts,
-            )
-        )
-
-    def _process_command_result(self, entry: dict[str, Any]) -> SSE | None:
-        """Process command result status messages."""
-        status = entry.get("status")
-        message = entry.get("message")
-        if status and message:
-            return reasoning_step(f"[{status}] {message}")
-        return None
-
-    def _process_data_items(
-        self, entry: dict[str, Any]
-    ) -> tuple[list[ClientArtifact], list[SSE]]:
-        """Process data items and return artifacts and events."""
-        items = entry.get("items")
-        if not isinstance(items, list):
-            return [], []
-
-        artifacts: list[ClientArtifact] = []
-        events: list[SSE] = []
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-
-            raw_content = item.get("content")
-            if not isinstance(raw_content, str):
-                continue
-
-            parsed = parse_json_content(raw_content)
-
-            # Check if it's tabular data (list of dicts)
-            if (
-                isinstance(parsed, list)
-                and parsed
-                and all(isinstance(row, dict) for row in parsed)
-            ):
-                artifacts.append(
-                    ClientArtifact(
-                        type="table",
-                        name=item.get("name") or f"Table_{uuid4().hex[:4]}",
-                        description=item.get("description") or "Widget data",
-                        content=parsed,
-                    )
-                )
-            elif isinstance(parsed, dict):
-                # Emit as message chunk
-                self._has_streamed_text = True
-                events.append(message_chunk(json.dumps(parsed)))
-            else:
-                # Emit as raw text message chunk
-                self._has_streamed_text = True
-                events.append(message_chunk(raw_content))
-
-        return artifacts, events
-
     def _artifact_from_output(self, output: Any) -> SSE | None:
         """Create an artifact (chart or table) from agent output if possible."""
-        if isinstance(output, dict):
-            chart_type = output.get("type")
-            data = output.get("data")
+        return artifact_from_output(output)
 
-            if isinstance(chart_type, str) and chart_type in {
-                "line",
-                "bar",
-                "scatter",
-                "pie",
-                "donut",
-            }:
-                rows = (
-                    [row for row in data or [] if isinstance(row, dict)]
-                    if isinstance(data, list)
-                    else []
-                )
-                if not rows:
-                    return None
+    def _widget_result_events(
+        self,
+        call_info: ToolCallInfo,
+        content: Any,
+    ) -> list[SSE]:
+        """Emit SSE events for widget results with graceful fallbacks."""
 
-                chart_type_literal = cast(
-                    Literal["line", "bar", "scatter", "pie", "donut"], chart_type
-                )
+        events = tool_result_events_from_content(
+            content, mark_streamed_text=self._record_text_streamed
+        )
+        if events:
+            return events
 
-                x_key = get_str(output, "x_key", "xKey")
-                y_keys = get_str_list(output, "y_keys", "yKeys", "y_key", "yKey")
-                angle_key = get_str(output, "angle_key", "angleKey")
-                callout_label_key = get_str(
-                    output, "callout_label_key", "calloutLabelKey"
-                )
-
-                if chart_type_literal in {"line", "bar", "scatter"}:
-                    if not x_key or not y_keys:
-                        return None
-                elif chart_type_literal in {"pie", "donut"}:
-                    if not angle_key or not callout_label_key:
-                        return None
-
-                return chart(
-                    type=chart_type_literal,
-                    data=rows,
-                    x_key=x_key,
-                    y_keys=y_keys,
-                    angle_key=angle_key,
-                    callout_label_key=callout_label_key,
-                    name=output.get("name"),
-                    description=output.get("description"),
-                )
-
-            table_data = None
-            if isinstance(output.get("table"), list):
-                table_data = output["table"]
-            elif isinstance(data, list) and all(
-                isinstance(item, dict) for item in data
-            ):
-                table_data = data
-
-            if table_data:
-                return table(
-                    data=table_data,
-                    name=output.get("name"),
-                    description=output.get("description"),
-                )
-
-        if (
-            isinstance(output, list)
-            and output
-            and all(isinstance(item, dict) for item in output)
-        ):
-            return table(data=output, name=None, description=None)
-
-        return None
+        return handle_generic_tool_result(
+            call_info,
+            content,
+            mark_streamed_text=self._record_text_streamed,
+        )

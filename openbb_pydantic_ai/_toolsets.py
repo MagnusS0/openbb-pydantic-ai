@@ -150,7 +150,7 @@ def build_widget_tool(widget: Widget) -> Tool:
     )
 
 
-class WidgetToolset(FunctionToolset):
+class WidgetToolset(FunctionToolset[OpenBBDeps]):
     """Toolset that exposes widgets as deferred tools."""
 
     def __init__(self, widgets: Sequence[Widget]):
@@ -167,7 +167,7 @@ class WidgetToolset(FunctionToolset):
         return self._widgets_by_tool
 
 
-class VisualizationToolset(FunctionToolset):
+class VisualizationToolset(FunctionToolset[OpenBBDeps]):
     """Toolset exposing helper utilities for charts and tables."""
 
     def __init__(self) -> None:
@@ -232,7 +232,9 @@ class VisualizationToolset(FunctionToolset):
         self.add_function(_create_chart, name="openbb_create_chart")
 
 
-def build_widget_toolsets(collection: WidgetCollection | None) -> list[FunctionToolset]:
+def build_widget_toolsets(
+    collection: WidgetCollection | None,
+) -> tuple[FunctionToolset[OpenBBDeps], ...]:
     """Create toolsets for each widget priority group plus visualization tools.
 
     Widgets are organized into separate toolsets by priority (primary, secondary, extra)
@@ -246,17 +248,17 @@ def build_widget_toolsets(collection: WidgetCollection | None) -> list[FunctionT
 
     Returns
     -------
-    list[FunctionToolset]
-        List of toolsets including widget toolsets and visualization toolset
+    tuple[FunctionToolset[OpenBBDeps], ...]
+        Toolsets including widget toolsets and visualization toolset
     """
     if collection is None:
-        return [VisualizationToolset()]
+        return (VisualizationToolset(),)
 
-    toolsets: list[FunctionToolset] = []
+    toolsets: list[FunctionToolset[OpenBBDeps]] = []
     for widgets in (collection.primary, collection.secondary, collection.extra):
         if widgets:
             toolsets.append(WidgetToolset(widgets))
 
     toolsets.append(VisualizationToolset())
 
-    return toolsets
+    return tuple(toolsets)

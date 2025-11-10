@@ -1,44 +1,43 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from functools import cached_property
 from typing import Any, cast
 
 from openbb_ai.models import (
     SSE,
-    LlmClientFunctionCall,
     LlmClientFunctionCallResultMessage,
-    LlmClientMessage,
     LlmMessage,
     QueryRequest,
-    RoleEnum,
-    Widget,
 )
 from pydantic_ai import DeferredToolResults
 from pydantic_ai.messages import (
     ModelMessage,
     SystemPromptPart,
-    TextPart,
-    ToolCallPart,
-    ToolReturnPart,
-    UserPromptPart,
 )
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
-from pydantic_ai.ui import MessagesBuilder, UIAdapter
+from pydantic_ai.ui import UIAdapter
 
 from ._dependencies import OpenBBDeps, build_deps_from_request
 from ._event_stream import OpenBBAIEventStream
+from ._message_transformer import MessageTransformer
+from ._serializers import ContentSerializer
 from ._toolsets import build_widget_toolsets
-from ._utils import hash_tool_call, serialize_result_content
+from ._utils import hash_tool_call
+from ._widget_registry import WidgetRegistry
 
 
 @dataclass(slots=True)
 class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any]):
     """UI adapter that bridges OpenBB Workspace requests with Pydantic AI."""
 
-    # Cache of tool call overrides initialised in __post_init__
-    _tool_call_id_overrides: dict[str, str] = field(init=False, default_factory=dict)
+    _: KW_ONLY
+    accept: str | None = None
+
+    # Initialized in __post_init__
+    _transformer: MessageTransformer = field(init=False)
+    _registry: WidgetRegistry = field(init=False)
     _base_messages: list[LlmMessage] = field(init=False, default_factory=list)
     _pending_results: list[LlmClientFunctionCallResultMessage] = field(
         init=False, default_factory=list
@@ -48,20 +47,28 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         base, pending = self._split_messages(self.run_input.messages)
         self._base_messages = base
         self._pending_results = pending
-        self._tool_call_id_overrides = {}
 
+        # Build tool call ID overrides for consistent IDs
+        tool_call_id_overrides: dict[str, str] = {}
         for message in self._base_messages:
             if isinstance(message, LlmClientFunctionCallResultMessage):
                 key = hash_tool_call(message.function, message.input_arguments)
                 tool_call_id = self._tool_call_id_from_result(message)
-                self._tool_call_id_overrides[key] = tool_call_id
+                tool_call_id_overrides[key] = tool_call_id
 
         for message in self._pending_results:
             key = hash_tool_call(message.function, message.input_arguments)
-            self._tool_call_id_overrides.setdefault(
+            tool_call_id_overrides.setdefault(
                 key,
                 self._tool_call_id_from_result(message),
             )
+
+        # Initialize transformer and registry
+        self._transformer = MessageTransformer(tool_call_id_overrides)
+        self._registry = WidgetRegistry(
+            collection=self.run_input.widgets,
+            toolsets=self._widget_toolsets,
+        )
 
     @classmethod
     def build_run_input(cls, body: bytes) -> QueryRequest:
@@ -69,80 +76,46 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
     @classmethod
     def load_messages(cls, messages: Sequence[LlmMessage]) -> list[ModelMessage]:
-        """Convert OpenBB messages to Pydantic AI messages."""
-        builder = MessagesBuilder()
-        for message in messages:
-            if isinstance(message, LlmClientMessage):
-                cls._add_client_message(builder, message)
-            elif isinstance(message, LlmClientFunctionCallResultMessage):
-                tool_call_id = hash_tool_call(message.function, message.input_arguments)
-                cls._add_function_call_result(
-                    builder,
-                    message,
-                    tool_call_id=tool_call_id,
-                )
-        return builder.messages
+        """Convert OpenBB messages to Pydantic AI messages.
 
-    @staticmethod
-    def _add_client_message(
-        builder: MessagesBuilder,
-        message: LlmClientMessage,
-        tool_call_id_overrides: dict[str, str] | None = None,
-    ) -> None:
-        """Add a client message to the builder with optional tool call ID overrides."""
-        content = message.content
-        if isinstance(content, LlmClientFunctionCall):
-            # Generate base tool call ID from hash
-            base_id = hash_tool_call(content.function, content.input_arguments)
-            # Use override if provided, otherwise use base ID
-            tool_call_id = (
-                tool_call_id_overrides.get(base_id, base_id)
-                if tool_call_id_overrides
-                else base_id
-            )
-            builder.add(
-                ToolCallPart(
-                    tool_name=content.function,
-                    tool_call_id=tool_call_id,
-                    args=content.input_arguments,
-                )
-            )
-            return
-
-        if isinstance(content, str):
-            if message.role == RoleEnum.human:
-                builder.add(UserPromptPart(content=content))
-            elif message.role == RoleEnum.ai:
-                builder.add(TextPart(content=content))
-            else:
-                builder.add(TextPart(content=content))
-
-    @classmethod
-    def _add_function_call_result(
-        cls,
-        builder: MessagesBuilder,
-        message: LlmClientFunctionCallResultMessage,
-        *,
-        tool_call_id: str,
-    ) -> None:
-        """Add a function call result to the builder."""
-        builder.add(
-            ToolReturnPart(
-                tool_name=message.function,
-                tool_call_id=tool_call_id,
-                content=serialize_result_content(message),
-            )
-        )
+        Note: This creates a transformer without overrides for standalone use.
+        """
+        transformer = MessageTransformer()
+        return transformer.transform_batch(messages)
 
     @staticmethod
     def _split_messages(
         messages: Sequence[LlmMessage],
     ) -> tuple[list[LlmMessage], list[LlmClientFunctionCallResultMessage]]:
+        """Split messages into base history and pending deferred results.
+
+        Only results after the last AI message are considered pending. Results
+        followed by AI messages were already processed in previous turns.
+
+        Parameters
+        ----------
+        messages : Sequence[LlmMessage]
+            Full message sequence
+
+        Returns
+        -------
+        tuple[list[LlmMessage], list[LlmClientFunctionCallResultMessage]]
+            (base messages, pending results that need processing)
+        """
         base = list(messages)
         pending: list[LlmClientFunctionCallResultMessage] = []
-        while base and isinstance(base[-1], LlmClientFunctionCallResultMessage):
-            result_msg = base.pop()
-            pending.insert(0, cast(LlmClientFunctionCallResultMessage, result_msg))
+
+        # Treat only the trailing tool results (those after the final assistant
+        # message) as pending. Leave them in the base history so the next model
+        # call still sees the complete tool call/result exchange.
+        idx = len(base) - 1
+        while idx >= 0:
+            message = base[idx]
+            if not isinstance(message, LlmClientFunctionCallResultMessage):
+                break
+            pending.insert(0, cast(LlmClientFunctionCallResultMessage, message))
+            idx -= 1
+
         return base, pending
 
     def _tool_call_id_from_result(
@@ -166,56 +139,59 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         if not self._pending_results:
             return None
 
+        # When those trailing results already sit in the base history, skip
+        # emitting DeferredToolResults; resending them would show up as a
+        # conflicting duplicate tool response upstream.
+        if self._pending_results_are_in_history():
+            return None
+
         results = DeferredToolResults()
         for message in self._pending_results:
             actual_id = self._tool_call_id_from_result(message)
-            serialized = serialize_result_content(message)
+            serialized = ContentSerializer.serialize_result(message)
             results.calls[actual_id] = serialized
         return results
 
+    def _pending_results_are_in_history(self) -> bool:
+        if not self._pending_results:
+            return False
+        pending_len = len(self._pending_results)
+        if pending_len > len(self._base_messages):
+            return False
+        tail = self._base_messages[-pending_len:]
+        return all(
+            orig is pending
+            for orig, pending in zip(tail, self._pending_results, strict=True)
+        )
+
     @cached_property
-    def _widget_toolsets(self) -> list[FunctionToolset]:
+    def _widget_toolsets(self) -> tuple[FunctionToolset[OpenBBDeps], ...]:
         return build_widget_toolsets(self.run_input.widgets)
 
     def build_event_stream(self) -> OpenBBAIEventStream:
         return OpenBBAIEventStream(
-            self.run_input,
-            accept=self.accept,
-            widget_lookup=self.widget_lookup,
+            run_input=self.run_input,
+            widget_registry=self._registry,
             pending_results=self._pending_results,
         )
 
     @cached_property
-    def widget_lookup(self) -> dict[str, Widget]:
-        lookup: dict[str, Widget] = {}
-        for toolset in self._widget_toolsets:
-            widgets = getattr(toolset, "widgets_by_tool", None)
-            if widgets:
-                lookup.update(widgets)
-        return lookup
-
-    @cached_property
     def messages(self) -> list[ModelMessage]:
-        """Build message history with context prompts and tool call ID overrides."""
+        """Build message history with context prompts."""
+        from pydantic_ai.ui import MessagesBuilder
+
         builder = MessagesBuilder()
         self._add_context_prompts(builder)
-        for message in self._base_messages:
-            if isinstance(message, LlmClientMessage):
-                # Use the unified method with overrides
-                self._add_client_message(
-                    builder,
-                    message,
-                    tool_call_id_overrides=self._tool_call_id_overrides,
-                )
-            elif isinstance(message, LlmClientFunctionCallResultMessage):
-                self._add_function_call_result(
-                    builder,
-                    message,
-                    tool_call_id=self._tool_call_id_from_result(message),
-                )
+
+        # Use transformer to convert messages with ID overrides
+        transformed = self._transformer.transform_batch(self._base_messages)
+        for msg in transformed:
+            for part in msg.parts:
+                builder.add(part)
+
         return builder.messages
 
-    def _add_context_prompts(self, builder: MessagesBuilder) -> None:
+    def _add_context_prompts(self, builder) -> None:
         """Add system prompts with workspace context, URLs, and dashboard info."""
         lines: list[str] = []
 
@@ -241,13 +217,14 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             builder.add(SystemPromptPart(content="\n".join(lines)))
 
     @cached_property
-    def toolset(self) -> AbstractToolset | None:
+    def toolset(self) -> AbstractToolset[OpenBBDeps] | None:
         """Build combined toolset from widget toolsets."""
         if not self._widget_toolsets:
             return None
         if len(self._widget_toolsets) == 1:
             return self._widget_toolsets[0]
-        return CombinedToolset(self._widget_toolsets)
+        combined = CombinedToolset(self._widget_toolsets)
+        return cast(AbstractToolset[OpenBBDeps], combined)
 
     @cached_property
     def state(self) -> dict[str, Any] | None:
