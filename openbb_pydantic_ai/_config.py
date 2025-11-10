@@ -8,34 +8,38 @@ from typing import Any, Mapping
 GET_WIDGET_DATA_TOOL_NAME = "get_widget_data"
 
 # Field exclusion lists for citation and status update details
-CITATION_EXCLUDED_FIELDS = frozenset([
-    "lastupdated",
-    "source",
-    "id",
-    "uuid",
-    "storedfileuuid",
-    "datakey",
-    "originalfilename",
-    "extension",
-    "category",
-    "subcategory",
-    "transcript_url",
-])
+CITATION_EXCLUDED_FIELDS = frozenset(
+    [
+        "lastupdated",
+        "source",
+        "id",
+        "uuid",
+        "storedfileuuid",
+        "datakey",
+        "originalfilename",
+        "extension",
+        "category",
+        "subcategory",
+        "transcript_url",
+    ]
+)
 
-STATUS_UPDATE_EXCLUDED_FIELDS = frozenset([
-    "lastupdated",
-    "source",
-    "id",
-    "uuid",
-    "storedfileuuid",
-    "url",
-    "datakey",
-    "originalfilename",
-    "extension",
-    "category",
-    "subcategory",
-    "transcript_url",
-])
+STATUS_UPDATE_EXCLUDED_FIELDS = frozenset(
+    [
+        "lastupdated",
+        "source",
+        "id",
+        "uuid",
+        "storedfileuuid",
+        "url",
+        "datakey",
+        "originalfilename",
+        "extension",
+        "category",
+        "subcategory",
+        "transcript_url",
+    ]
+)
 
 # Widget parameter type to JSON schema mapping
 PARAM_TYPE_SCHEMA_MAP: Mapping[str, dict[str, Any]] = {
