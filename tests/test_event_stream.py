@@ -14,6 +14,7 @@ from openbb_ai.models import (
 )
 from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import (
+    FunctionToolCallEvent,
     FunctionToolResultEvent,
     TextPart,
     ThinkingPart,
@@ -28,6 +29,8 @@ from openbb_pydantic_ai import (
     OpenBBAIEventStream,
     build_widget_tool_name,
 )
+from openbb_pydantic_ai._event_stream_helpers import ToolCallInfo
+from openbb_pydantic_ai._widget_registry import WidgetRegistry
 
 
 def test_event_stream_emits_widget_requests_and_citations(
@@ -36,9 +39,11 @@ def test_event_stream_emits_widget_requests_and_citations(
     widget = widget_collection.primary[0]
     tool_name = build_widget_tool_name(widget)
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    registry = WidgetRegistry()
+    registry._by_tool_name[tool_name] = widget
     stream = OpenBBAIEventStream(
         run_input=request,
-        widget_lookup={tool_name: widget},
+        widget_registry=registry,
     )
 
     deferred = DeferredToolRequests()
@@ -57,7 +62,7 @@ def test_event_stream_emits_widget_requests_and_citations(
     assert events[0].event == "copilotStatusUpdate"
     assert "Sample Widget" in events[0].data.message
     assert events[1].event == "copilotFunctionCall"
-    assert "call-1" in stream._pending_tool_calls  # type: ignore[attr-defined]
+    assert stream._tool_calls.has_pending("call-1")  # type: ignore[attr-defined]
 
     tool_result_event = FunctionToolResultEvent(
         result=ToolReturnPart(
@@ -92,7 +97,7 @@ def test_artifact_detection_for_table(make_request) -> None:
     request = make_request(
         [LlmClientMessage(role=RoleEnum.human, content="Data please")]
     )
-    stream = OpenBBAIEventStream(run_input=request, widget_lookup={})
+    stream = OpenBBAIEventStream(run_input=request)
 
     artifact = stream._artifact_from_output([{"col": 1}, {"col": 2}])
     assert artifact is not None
@@ -102,7 +107,7 @@ def test_artifact_detection_for_table(make_request) -> None:
 
 def test_artifact_detection_normalizes_chart_payload(make_request) -> None:
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Chart")])
-    stream = OpenBBAIEventStream(run_input=request, widget_lookup={})
+    stream = OpenBBAIEventStream(run_input=request)
 
     artifact = stream._artifact_from_output(
         {
@@ -121,6 +126,55 @@ def test_artifact_detection_normalizes_chart_payload(make_request) -> None:
     assert params.yKey == ["value"]
 
 
+def test_non_widget_tool_calls_show_in_reasoning(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    call_event = FunctionToolCallEvent(
+        part=ToolCallPart(
+            tool_name="internal_tool",
+            tool_call_id="tool-42",
+            args={
+                "query": "AAPL",
+                "data": [{"value": 1}, {"value": 2}, {"value": 3}],
+            },
+        )
+    )
+
+    async def _run_call():
+        return [event async for event in stream.handle_function_tool_call(call_event)]
+
+    call_events = asyncio.run(_run_call())
+    assert call_events
+    assert call_events[0].event == "copilotStatusUpdate"
+    assert "internal_tool" in call_events[0].data.message
+    assert call_events[0].data.details
+    detail_entry = call_events[0].data.details[0]
+    assert detail_entry["query"] == "AAPL"
+    assert "list(len=3" in detail_entry["data"]
+
+    result_event = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name="internal_tool",
+            tool_call_id="tool-42",
+            content=[{"name": "address", "description": "Address"}],
+        )
+    )
+
+    async def _run_result():
+        return [
+            event async for event in stream.handle_function_tool_result(result_event)
+        ]
+
+    result_events = asyncio.run(_run_result())
+    assert result_events
+    assert len(result_events) == 1
+    artifact_step = result_events[0]
+    assert artifact_step.event == "copilotStatusUpdate"
+    assert "internal_tool" in artifact_step.data.message
+    assert artifact_step.data.artifacts
+
+
 @pytest.mark.parametrize(
     ("has_streamed_text", "output_text", "expected_in_after"),
     [
@@ -132,7 +186,7 @@ def test_final_output_handling(
     has_streamed_text, output_text, expected_in_after, make_request
 ):
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
-    stream = OpenBBAIEventStream(run_input=request, widget_lookup={})
+    stream = OpenBBAIEventStream(run_input=request)
 
     async def _run() -> None:
         if has_streamed_text:
@@ -159,7 +213,7 @@ def test_final_output_handling(
 
 def test_thinking_events_emit_reasoning_step(make_request) -> None:
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
-    stream = OpenBBAIEventStream(run_input=request, widget_lookup={})
+    stream = OpenBBAIEventStream(run_input=request)
 
     async def _run() -> list:
         start_part = ThinkingPart(content="We must respond")
@@ -215,9 +269,12 @@ def test_deferred_results_emit_artifacts_and_citations(
     )
 
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    registry = WidgetRegistry()
+    registry._by_tool_name[tool_name] = widget
+    registry._by_uuid[str(widget.uuid)] = widget
     stream = OpenBBAIEventStream(
         run_input=request,
-        widget_lookup={tool_name: widget},
+        widget_registry=registry,
         pending_results=[result_message],
     )
 
@@ -237,3 +294,74 @@ def test_deferred_results_emit_artifacts_and_citations(
 
     after_events = asyncio.run(_collect_after())
     assert any(e.event == "copilotCitationCollection" for e in after_events)
+
+
+def test_deferred_result_without_widget_metadata_is_streamed(make_request) -> None:
+    result_message = LlmClientFunctionCallResultMessage(
+        function="orphan_widget",
+        input_arguments={"symbol": "MSFT"},
+        data=[
+            DataContent(
+                items=[SingleDataContent(content='[{"value": 1}]')],
+            )
+        ],
+    )
+
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(
+        run_input=request,
+        pending_results=[result_message],
+    )
+
+    async def _collect_before():
+        return [event async for event in stream.before_stream()]
+
+    events = asyncio.run(_collect_before())
+    warnings = [
+        e
+        for e in events
+        if getattr(e, "event", None) == "copilotStatusUpdate"
+        and "metadata" in getattr(getattr(e, "data", object()), "message", "")
+    ]
+    assert warnings, "Expected warning about missing widget metadata"
+    artifact_events = [e for e in events if getattr(e.data, "artifacts", None)]
+    assert artifact_events, "Expected data emission even without widget metadata"
+
+
+def test_widget_result_without_structured_data_falls_back_to_reasoning(
+    widget_collection, make_request
+) -> None:
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    registry = WidgetRegistry()
+    registry._by_tool_name[tool_name] = widget
+    stream = OpenBBAIEventStream(
+        run_input=request,
+        widget_registry=registry,
+    )
+
+    stream._tool_calls.register_call(  # type: ignore[attr-defined]
+        tool_call_id="call-42",
+        tool_name=tool_name,
+        args={"symbol": "NFLX"},
+        widget=widget,
+    )
+
+    result_event = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name=tool_name,
+            tool_call_id="call-42",
+            content={"unexpected": "value"},
+        )
+    )
+
+    async def _run_result():
+        return [
+            event
+            async for event in stream.handle_function_tool_result(result_event)
+        ]
+
+    events = asyncio.run(_run_result())
+    assert events, "Expected fallback reasoning events for widget result"
+    assert events[0].event == "copilotStatusUpdate"
