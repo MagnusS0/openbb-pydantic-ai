@@ -247,9 +247,6 @@ def tool_result_events_from_content(
     return events
 
 
-
-
-
 def artifact_from_output(output: Any) -> SSE | None:
     """Create an artifact SSE from generic tool output payloads.
 

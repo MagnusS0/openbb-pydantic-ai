@@ -73,9 +73,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, AgentDepsT, Any]):
 
     # State management components
     _tool_calls: ToolCallTracker = field(init=False, default_factory=ToolCallTracker)
-    _citations: CitationCollector = field(
-        init=False, default_factory=CitationCollector
-    )
+    _citations: CitationCollector = field(init=False, default_factory=CitationCollector)
     _thinking: ThinkingBuffer = field(init=False, default_factory=ThinkingBuffer)
 
     # Simple state flags

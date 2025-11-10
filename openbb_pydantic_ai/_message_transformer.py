@@ -25,7 +25,7 @@ from ._serializers import ContentSerializer
 
 class MessageTransformer:
     """Transforms OpenBB messages to Pydantic AI messages.
-    
+
     Manages tool call ID consistency across message history.
     """
 

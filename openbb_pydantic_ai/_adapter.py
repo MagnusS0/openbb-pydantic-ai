@@ -74,7 +74,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     @classmethod
     def load_messages(cls, messages: Sequence[LlmMessage]) -> list[ModelMessage]:
         """Convert OpenBB messages to Pydantic AI messages.
-        
+
         Note: This creates a transformer without overrides for standalone use.
         """
         transformer = MessageTransformer()
@@ -85,15 +85,15 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         messages: Sequence[LlmMessage],
     ) -> tuple[list[LlmMessage], list[LlmClientFunctionCallResultMessage]]:
         """Split messages into base history and pending deferred results.
-        
+
         Only results after the last AI message are considered pending. Results
         followed by AI messages were already processed in previous turns.
-        
+
         Parameters
         ----------
         messages : Sequence[LlmMessage]
             Full message sequence
-        
+
         Returns
         -------
         tuple[list[LlmMessage], list[LlmClientFunctionCallResultMessage]]
@@ -101,13 +101,13 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         """
         base = list(messages)
         pending: list[LlmClientFunctionCallResultMessage] = []
-        
+
         # Only split results that come after the last AI message
         # Results followed by AI messages were already processed
         while base and isinstance(base[-1], LlmClientFunctionCallResultMessage):
             result_msg = base.pop()
             pending.insert(0, cast(LlmClientFunctionCallResultMessage, result_msg))
-        
+
         return base, pending
 
     def _tool_call_id_from_result(
@@ -149,8 +149,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             pending_results=self._pending_results,
         )
 
-
-
     @cached_property
     def messages(self) -> list[ModelMessage]:
         """Build message history with context prompts."""
@@ -158,13 +156,13 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         builder = MessagesBuilder()
         self._add_context_prompts(builder)
-        
+
         # Use transformer to convert messages with ID overrides
         transformed = self._transformer.transform_batch(self._base_messages)
         for msg in transformed:
             for part in msg.parts:
                 builder.add(part)
-        
+
         return builder.messages
 
     def _add_context_prompts(self, builder) -> None:

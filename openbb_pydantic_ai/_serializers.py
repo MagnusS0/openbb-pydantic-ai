@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from openbb_ai.models import LlmClientFunctionCallResultMessage
 
@@ -37,10 +37,13 @@ class ContentSerializer:
             else:
                 data.append(item)
 
-        content: SerializedContent = {
-            "input_arguments": message.input_arguments,
-            "data": data,
-        }
+        content: SerializedContent = cast(
+            SerializedContent,
+            {
+                "input_arguments": message.input_arguments,
+                "data": data,
+            },
+        )
         if message.extra_state:
             content["extra_state"] = message.extra_state
         return content

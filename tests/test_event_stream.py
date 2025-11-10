@@ -29,7 +29,6 @@ from openbb_pydantic_ai import (
     OpenBBAIEventStream,
     build_widget_tool_name,
 )
-from openbb_pydantic_ai._event_stream_helpers import ToolCallInfo
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 
 
@@ -358,8 +357,7 @@ def test_widget_result_without_structured_data_falls_back_to_reasoning(
 
     async def _run_result():
         return [
-            event
-            async for event in stream.handle_function_tool_result(result_event)
+            event async for event in stream.handle_function_tool_result(result_event)
         ]
 
     events = asyncio.run(_run_result())

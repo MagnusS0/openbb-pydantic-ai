@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, NotRequired, Protocol, TypedDict
+import sys
+from typing import Any, Protocol, TypedDict
+
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:
+    from typing_extensions import NotRequired  # type: ignore[assignment]
 
 
 class SerializedContent(TypedDict):

@@ -49,12 +49,21 @@ class EventBuilder:
         StatusUpdateSSE
             A status update SSE event
         """
+        # Normalize dict details to list format expected by StatusUpdateSSEData
+        normalized_details: list[dict[str, Any] | str] | None = None
+        if details is not None:
+            if isinstance(details, dict):
+                normalized_details = [details]
+            else:
+                # details is already a list[dict[str, Any] | str]
+                normalized_details = details  # type: ignore[assignment]
+
         return StatusUpdateSSE(
             data=StatusUpdateSSEData(
                 eventType=event_type,
                 message=message,
                 group="reasoning",
-                details=details,
+                details=normalized_details,
                 artifacts=artifacts,
                 hidden=hidden,
             )
@@ -131,9 +140,7 @@ class EventBuilder:
         CitationCollectionSSE
             A citation collection SSE event
         """
-        return CitationCollectionSSE(
-            data=CitationCollection(citations=citation_list)
-        )
+        return CitationCollectionSSE(data=CitationCollection(citations=citation_list))
 
     @staticmethod
     def error(
