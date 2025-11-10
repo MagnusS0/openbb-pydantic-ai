@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from functools import cached_property
 from typing import Any, cast
 
@@ -31,6 +31,9 @@ from ._widget_registry import WidgetRegistry
 @dataclass(slots=True)
 class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any]):
     """UI adapter that bridges OpenBB Workspace requests with Pydantic AI."""
+
+    _: KW_ONLY
+    accept: str | None = None
 
     # Initialized in __post_init__
     _transformer: MessageTransformer = field(init=False)
