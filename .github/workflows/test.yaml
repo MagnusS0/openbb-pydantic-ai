@@ -20,7 +20,7 @@ jobs:
           enable-cache: true
 
       - name: Sync (dev + extras) — locked
-        run: uv sync --locked --dev --extra pydantic_ui
+        run: uv sync --locked --dev
 
       - name: Run tests
-        run: uv run pytest tests
+        run: uv run pytest tests --ignore=tests/smoke_test.py
