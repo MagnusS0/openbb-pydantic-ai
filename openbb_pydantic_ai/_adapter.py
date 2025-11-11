@@ -196,15 +196,18 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         lines: list[str] = []
 
         if self.deps.context:
-            lines.append("Workspace context:")
+            lines.append("<workspace_context>")
             for ctx in self.deps.context:
                 row_count = len(ctx.data.items) if ctx.data and ctx.data.items else 0
                 summary = f"- {ctx.name} ({row_count} rows): {ctx.description}"
                 lines.append(summary)
+            lines.append("</workspace_context>")
 
         if self.deps.urls:
+            lines.append("<relevant_urls>")
             joined = ", ".join(self.deps.urls)
             lines.append(f"Relevant URLs: {joined}")
+            lines.append("</relevant_urls>")
 
         workspace_state = self.deps.workspace_state
         if workspace_state and workspace_state.current_dashboard_info:
@@ -240,6 +243,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         message_history=None,
         deferred_tool_results=None,
         model=None,
+        instructions=None,
         deps=None,
         model_settings=None,
         usage_limits=None,
@@ -261,6 +265,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
             model=model,
+            instructions=instructions,
             deps=deps,
             model_settings=model_settings,
             usage_limits=usage_limits,
@@ -277,6 +282,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         message_history=None,
         deferred_tool_results=None,
         model=None,
+        instructions=None,
         deps=None,
         model_settings=None,
         usage_limits=None,
@@ -296,6 +302,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
             model=model,
+            instructions=instructions,
             deps=deps,
             model_settings=model_settings,
             usage_limits=usage_limits,

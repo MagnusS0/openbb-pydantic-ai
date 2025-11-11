@@ -1,6 +1,6 @@
 [project]
 name = "openbb-pydantic-ai"
-version = "0.1.1"
+version = "0.1.2"
 description = "Pydantic AI adapter for OpenBB SDK. Enables connettion any pydantic-ai agent to the OpenBB Workspace."
 authors = [
     { name = "Magnus Samuelsen" }
@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "openbb-ai>=1.7.6",
-    "pydantic-ai-slim>=1.12.0",
+    "pydantic-ai-slim>=1.14.0",
 ]
 
 [dependency-groups]
