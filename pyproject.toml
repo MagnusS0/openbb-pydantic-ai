@@ -1,6 +1,6 @@
 [project]
 name = "openbb-pydantic-ai"
-version = "0.1.2"
+version = "0.1.3"
 description = "Pydantic AI adapter for OpenBB SDK. Enables connettion any pydantic-ai agent to the OpenBB Workspace."
 authors = [
     { name = "Magnus Samuelsen" }
@@ -29,7 +29,6 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "openbb_pydantic_ai"
 module-root = ""
-
 
 [tool.ruff.lint]
 select = [

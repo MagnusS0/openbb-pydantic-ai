@@ -256,7 +256,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         Run the agent with OpenBB-specific defaults for
         deps, messages, and deferred results.
         """
-        deps = deps or self.deps  # type: ignore[assignment]
+        deps = deps or self.deps
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
