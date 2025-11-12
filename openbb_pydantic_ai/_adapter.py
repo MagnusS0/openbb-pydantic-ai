@@ -260,7 +260,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
-        return super().run_stream_native(
+        return OpenBBAIAdapter.run_stream_native(
+            self,
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
@@ -297,7 +298,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
-        return super().run_stream(
+        return OpenBBAIAdapter.run_stream(
+            self,
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
