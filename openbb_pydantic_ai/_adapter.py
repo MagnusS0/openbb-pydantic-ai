@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from functools import cached_property
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from openbb_ai.models import (
     SSE,
@@ -12,12 +12,19 @@ from openbb_ai.models import (
     QueryRequest,
 )
 from pydantic_ai import DeferredToolResults
+from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.agent.abstract import Instructions
+from pydantic_ai.builtin_tools import AbstractBuiltinTool
 from pydantic_ai.messages import (
     ModelMessage,
     SystemPromptPart,
 )
+from pydantic_ai.models import KnownModelName, Model
+from pydantic_ai.output import OutputSpec
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
-from pydantic_ai.ui import UIAdapter
+from pydantic_ai.ui import OnCompleteFunc, UIAdapter
+from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import override
 
 from ._dependencies import OpenBBDeps, build_deps_from_request
@@ -27,6 +34,10 @@ from ._serializers import ContentSerializer
 from ._toolsets import build_widget_toolsets
 from ._utils import hash_tool_call
 from ._widget_registry import WidgetRegistry
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
+    from starlette.responses import Response
 
 
 @dataclass
@@ -237,28 +248,69 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             return None
         return self.run_input.workspace_state.model_dump(exclude_none=True)
 
+    @classmethod
+    async def dispatch_request(
+        cls,
+        request: "Request",
+        *,
+        agent: AbstractAgent[OpenBBDeps, Any],
+        message_history: Sequence[ModelMessage] | None = None,
+        deferred_tool_results: DeferredToolResults | None = None,
+        model: Model | KnownModelName | str | None = None,
+        instructions: Instructions[OpenBBDeps] = None,
+        deps: OpenBBDeps | None = None,
+        output_type: OutputSpec[Any] | None = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: UsageLimits | None = None,
+        usage: RunUsage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
+        builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
+        on_complete: OnCompleteFunc[SSE] | None = None,
+    ) -> "Response":
+        """Override UIAdapter.dispatch_request to allow optional deps."""
+        deps_to_forward = cast(OpenBBDeps, deps)
+
+        return await super().dispatch_request(
+            request,
+            agent=agent,
+            message_history=message_history,
+            deferred_tool_results=deferred_tool_results,
+            model=model,
+            instructions=instructions,
+            deps=deps_to_forward,
+            output_type=output_type,
+            model_settings=model_settings,
+            usage_limits=usage_limits,
+            usage=usage,
+            infer_name=infer_name,
+            toolsets=toolsets,
+            builtin_tools=builtin_tools,
+            on_complete=on_complete,
+        )
+
     @override
     def run_stream_native(
         self,
         *,
-        output_type=None,
-        message_history=None,
-        deferred_tool_results=None,
-        model=None,
-        instructions=None,
-        deps=None,
-        model_settings=None,
-        usage_limits=None,
-        usage=None,
-        infer_name=True,
-        toolsets=None,
-        builtin_tools=None,
+        output_type: OutputSpec[Any] | None = None,
+        message_history: Sequence[ModelMessage] | None = None,
+        deferred_tool_results: DeferredToolResults | None = None,
+        model: Model | KnownModelName | str | None = None,
+        instructions: Instructions[OpenBBDeps] = None,
+        deps: OpenBBDeps | None = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: UsageLimits | None = None,
+        usage: RunUsage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
+        builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
     ):
         """
         Run the agent with OpenBB-specific defaults for
         deps, messages, and deferred results.
         """
-        deps = deps or self.deps
+        resolved_deps: OpenBBDeps = deps or self.deps
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
@@ -268,7 +320,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             deferred_tool_results=deferred_tool_results,
             model=model,
             instructions=instructions,
-            deps=deps,
+            deps=resolved_deps,
             model_settings=model_settings,
             usage_limits=usage_limits,
             usage=usage,
@@ -281,22 +333,22 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     def run_stream(
         self,
         *,
-        output_type=None,
-        message_history=None,
-        deferred_tool_results=None,
-        model=None,
-        instructions=None,
-        deps=None,
-        model_settings=None,
-        usage_limits=None,
-        usage=None,
-        infer_name=True,
-        toolsets=None,
-        builtin_tools=None,
-        on_complete=None,
+        output_type: OutputSpec[Any] | None = None,
+        message_history: Sequence[ModelMessage] | None = None,
+        deferred_tool_results: DeferredToolResults | None = None,
+        model: Model | KnownModelName | str | None = None,
+        instructions: Instructions[OpenBBDeps] = None,
+        deps: OpenBBDeps | None = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: UsageLimits | None = None,
+        usage: RunUsage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
+        builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
+        on_complete: OnCompleteFunc[SSE] | None = None,
     ):
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
-        deps = deps or self.deps
+        resolved_deps: OpenBBDeps = deps or self.deps
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
@@ -306,7 +358,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             deferred_tool_results=deferred_tool_results,
             model=model,
             instructions=instructions,
-            deps=deps,
+            deps=resolved_deps,
             model_settings=model_settings,
             usage_limits=usage_limits,
             usage=usage,
