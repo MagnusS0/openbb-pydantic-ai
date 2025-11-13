@@ -18,6 +18,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
 from pydantic_ai.ui import UIAdapter
+from typing_extensions import override
 
 from ._dependencies import OpenBBDeps, build_deps_from_request
 from ._event_stream import OpenBBAIEventStream
@@ -28,7 +29,7 @@ from ._utils import hash_tool_call
 from ._widget_registry import WidgetRegistry
 
 
-@dataclass(slots=True)
+@dataclass
 class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any]):
     """UI adapter that bridges OpenBB Workspace requests with Pydantic AI."""
 
@@ -236,6 +237,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             return None
         return self.run_input.workspace_state.model_dump(exclude_none=True)
 
+    @override
     def run_stream_native(
         self,
         *,
@@ -260,8 +262,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
-        return OpenBBAIAdapter.run_stream_native(
-            self,
+        return super().run_stream_native(
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
@@ -276,6 +277,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             builtin_tools=builtin_tools,
         )
 
+    @override
     def run_stream(
         self,
         *,
@@ -294,12 +296,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         on_complete=None,
     ):
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
-        deps = deps or self.deps  # type: ignore[assignment]
+        deps = deps or self.deps
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
-        return OpenBBAIAdapter.run_stream(
-            self,
+        return super().run_stream(
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
