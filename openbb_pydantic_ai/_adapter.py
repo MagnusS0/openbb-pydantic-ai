@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
@@ -10,6 +10,7 @@ from openbb_ai.models import (
     LlmClientFunctionCallResultMessage,
     LlmMessage,
     QueryRequest,
+    Undefined,
 )
 from pydantic_ai import DeferredToolResults
 from pydantic_ai.agent import AbstractAgent
@@ -221,6 +222,15 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             lines.append(f"Relevant URLs: {joined}")
             lines.append("</relevant_urls>")
 
+        widget_defaults = self._widget_default_lines()
+        if widget_defaults:
+            lines.append("<widget_defaults>")
+            lines.append(
+                "Preloaded widget values (reuse unless the user requests different data):"  # noqa: E501
+            )
+            lines.extend(widget_defaults)
+            lines.append("</widget_defaults>")
+
         workspace_state = self.deps.workspace_state
         if workspace_state and workspace_state.current_dashboard_info:
             dashboard = workspace_state.current_dashboard_info
@@ -230,6 +240,63 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         if lines:
             builder.add(SystemPromptPart(content="\n".join(lines)))
+
+    def _widget_default_lines(self) -> list[str]:
+        """Build prompt lines summarizing current or default widget parameter values."""
+        if not self.deps.widgets:
+            return []
+
+        widgets_iter = self.deps.iter_widgets()
+
+        lines: list[str] = []
+        for widget in widgets_iter:
+            params = getattr(widget, "params", None)
+            if not params:
+                continue
+
+            param_entries: list[str] = []
+            for param in params:
+                source: str | None = None
+                value: Any | None = None
+
+                if param.current_value is not None:
+                    source = "current"
+                    value = param.current_value
+                elif param.default_value is not Undefined.UNDEFINED:
+                    source = "default"
+                    value = param.default_value
+
+                if value is None:
+                    continue
+
+                formatted_value = self._format_widget_value(value)
+                entry = f"{param.name}={formatted_value}"
+                if source == "current":
+                    entry += " (current)"
+                elif source == "default":
+                    entry += " (default)"
+                param_entries.append(entry)
+
+            if not param_entries:
+                continue
+
+            widget_name = widget.name or widget.widget_id
+            lines.append(f"- {widget_name}: {', '.join(param_entries)}")
+
+        return lines
+
+    @staticmethod
+    def _format_widget_value(value: Any) -> str:
+        """Return a human-readable representation of a widget parameter value."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, Mapping):
+            return ", ".join(f"{key}={val}" for key, val in value.items())
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            return ", ".join(str(item) for item in value)
+        return str(value)
 
     @cached_property
     def toolset(self) -> AbstractToolset[OpenBBDeps] | None:
