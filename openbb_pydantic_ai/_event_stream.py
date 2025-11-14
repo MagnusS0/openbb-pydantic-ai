@@ -115,7 +115,12 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         )
 
         if widget is not None:
-            citation = cite(widget, widget_args)
+            citation_details = format_args(widget_args)
+            citation = cite(
+                widget,
+                widget_args,
+                extra_details=citation_details if citation_details else None,
+            )
             self._citations.add(citation)
         else:
             details = format_args(widget_args)
@@ -304,8 +309,13 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             return
 
         if call_info.widget is not None:
+            citation_details = format_args(call_info.args)
             # Collect citation for later emission (at the end)
-            citation = cite(call_info.widget, call_info.args)
+            citation = cite(
+                call_info.widget,
+                call_info.args,
+                extra_details=citation_details if citation_details else None,
+            )
             self._citations.add(citation)
 
             for sse in self._widget_result_events(call_info, result_part.content):
