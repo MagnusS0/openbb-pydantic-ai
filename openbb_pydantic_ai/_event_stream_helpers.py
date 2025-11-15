@@ -362,6 +362,20 @@ def _process_command_result(entry: dict[str, Any]) -> SSE | None:
     return None
 
 
+def _dict_items_to_rows(data: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Convert a mapping into key/value rows for table rendering."""
+
+    rows: list[dict[str, str]] = []
+    for key, value in data.items():
+        rows.append(
+            {
+                "Field": str(key),
+                "Value": format_arg_value(value),
+            }
+        )
+    return rows
+
+
 def _process_data_items(
     entry: dict[str, Any], mark_streamed_text: TextStreamCallback
 ) -> tuple[list[ClientArtifact], list[SSE]]:
@@ -413,8 +427,19 @@ def _process_data_items(
                 )
             )
         elif isinstance(parsed, dict):
-            mark_streamed_text()
-            events.append(message_chunk(json.dumps(parsed)))
+            rows = _dict_items_to_rows(parsed)
+            if rows:
+                artifacts.append(
+                    ClientArtifact(
+                        type="table",
+                        name=item.get("name") or f"Details_{uuid4().hex[:4]}",
+                        description=item.get("description") or "Widget data",
+                        content=rows,
+                    )
+                )
+            else:
+                mark_streamed_text()
+                events.append(message_chunk(json.dumps(parsed)))
         else:
             mark_streamed_text()
             events.append(message_chunk(raw_content))
