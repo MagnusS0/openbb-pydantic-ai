@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 # Tool name constants
 GET_WIDGET_DATA_TOOL_NAME = "get_widget_data"
+EXECUTE_MCP_TOOL_NAME = "execute_agent_tool"
 CHART_TOOL_NAME = "openbb_create_chart"
 CHART_PLACEHOLDER_TOKEN = "{{openbb_chart}}"  # noqa: S105
 

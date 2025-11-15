@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,7 +16,10 @@ from openbb_ai.helpers import (
 )
 from openbb_ai.models import (
     SSE,
+    AgentTool,
     Citation,
+    FunctionCallSSE,
+    FunctionCallSSEData,
     LlmClientFunctionCallResultMessage,
     MessageArtifactSSE,
     MessageChunkSSE,
@@ -42,6 +45,7 @@ from pydantic_ai.ui import UIEventStream
 from ._config import (
     CHART_PLACEHOLDER_TOKEN,
     CHART_TOOL_NAME,
+    EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
 )
 from ._dependencies import OpenBBDeps
@@ -76,6 +80,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     pending_results: list[LlmClientFunctionCallResultMessage] = field(
         default_factory=list
     )
+    mcp_tools: Mapping[str, AgentTool] | None = None
 
     # State management components
     _tool_calls: ToolCallTracker = field(init=False, default_factory=ToolCallTracker)
@@ -113,6 +118,29 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         self, result_message: LlmClientFunctionCallResultMessage
     ) -> AsyncIterator[SSE]:
         """Process a single deferred result message and yield SSE events."""
+        if result_message.function == EXECUTE_MCP_TOOL_NAME:
+            tool_name = result_message.input_arguments.get("tool_name")
+            parameters = result_message.input_arguments.get("parameters", {})
+            args = normalize_args(parameters)
+            agent_tool = (
+                self._find_agent_tool(tool_name)
+                if tool_name and self.mcp_tools
+                else None
+            )
+            call_info = ToolCallInfo(
+                tool_name=tool_name or EXECUTE_MCP_TOOL_NAME,
+                args=args,
+                agent_tool=agent_tool,
+            )
+            content = serialized_content_from_result(result_message)
+            for sse in handle_generic_tool_result(
+                call_info,
+                content,
+                mark_streamed_text=self._record_text_streamed,
+            ):
+                yield sse
+            return
+
         widget_entries = self._widget_entries_from_result(result_message)
         content = serialized_content_from_result(result_message)
 
@@ -192,6 +220,47 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         widget_args = extract_widget_args(result)
         return [(widget, widget_args)]
 
+    def _find_agent_tool(self, tool_name: str) -> AgentTool | None:
+        if not self.mcp_tools:
+            return None
+        return self.mcp_tools.get(tool_name)
+
+    def _build_mcp_function_call(
+        self,
+        *,
+        tool_call_id: str,
+        agent_tool: AgentTool,
+        args: dict[str, Any],
+    ) -> FunctionCallSSE:
+        server_identifier = agent_tool.server_id or agent_tool.url
+        input_arguments: dict[str, Any] = {
+            "server_id": server_identifier,
+            "tool_name": agent_tool.name,
+            "parameters": args,
+        }
+        if agent_tool.endpoint:
+            input_arguments["endpoint"] = agent_tool.endpoint
+        if agent_tool.url:
+            input_arguments.setdefault("url", agent_tool.url)
+
+        extra_state = {
+            "tool_calls": [
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": agent_tool.name,
+                    "server_id": server_identifier,
+                }
+            ]
+        }
+
+        return FunctionCallSSE(
+            data=FunctionCallSSEData(
+                function=EXECUTE_MCP_TOOL_NAME,
+                input_arguments=input_arguments,
+                extra_state=extra_state,
+            )
+        )
+
     async def on_error(self, error: Exception) -> AsyncIterator[SSE]:
         yield reasoning_step(str(error), event_type="ERROR")
 
@@ -270,10 +339,24 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         """Process deferred tool requests and yield widget request events."""
         widget_requests: list[WidgetRequest] = []
         tool_call_ids: list[dict[str, Any]] = []
+        mcp_requests: list[tuple[str, AgentTool, dict[str, Any]]] = []
 
         for call in output.calls:
             widget = self.widget_registry.find_by_tool_name(call.tool_name)
             if widget is None:
+                agent_tool = self._find_agent_tool(call.tool_name)
+                if agent_tool is None:
+                    continue
+
+                args = normalize_args(call.args)
+                self._tool_calls.register_call(
+                    tool_call_id=call.tool_call_id,
+                    tool_name=call.tool_name,
+                    args=args,
+                    agent_tool=agent_tool,
+                )
+
+                mcp_requests.append((call.tool_call_id, agent_tool, args))
                 continue
 
             args = normalize_args(call.args)
@@ -307,6 +390,13 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             sse = get_widget_data(widget_requests)
             sse.data.extra_state = {"tool_calls": tool_call_ids}
             yield sse
+
+        for tool_call_id, agent_tool, args in mcp_requests:
+            yield self._build_mcp_function_call(
+                tool_call_id=tool_call_id,
+                agent_tool=agent_tool,
+                args=args,
+            )
 
     async def handle_function_tool_call(
         self, event: FunctionToolCallEvent

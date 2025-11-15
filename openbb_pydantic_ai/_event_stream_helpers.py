@@ -10,6 +10,7 @@ from uuid import uuid4
 from openbb_ai.helpers import chart, message_chunk, reasoning_step, table
 from openbb_ai.models import (
     SSE,
+    AgentTool,
     ClientArtifact,
     LlmClientFunctionCallResultMessage,
     MessageArtifactSSE,
@@ -40,11 +41,14 @@ class ToolCallInfo:
         Arguments passed to the tool
     widget : Widget | None
         Associated widget if this is a widget tool call, None otherwise
+    agent_tool : AgentTool | None
+        Agent tool metadata when the call targets an MCP tool
     """
 
     tool_name: str
     args: dict[str, Any]
     widget: Widget | None = None
+    agent_tool: AgentTool | None = None
 
 
 def find_widget_for_result(
@@ -411,19 +415,16 @@ def _process_data_items(
         if not isinstance(raw_content, str):
             continue
 
-        parsed = ContentSerializer.parse_json(raw_content)
+        parsed = _decode_nested_json(ContentSerializer.parse_json(raw_content))
 
-        if (
-            isinstance(parsed, list)
-            and parsed
-            and all(isinstance(row, dict) for row in parsed)
-        ):
+        table_rows = _extract_table_rows(parsed)
+        if table_rows is not None:
             artifacts.append(
                 ClientArtifact(
                     type="table",
                     name=item.get("name") or f"Table_{uuid4().hex[:4]}",
                     description=item.get("description") or "Widget data",
-                    content=parsed,
+                    content=table_rows,
                 )
             )
         elif isinstance(parsed, dict):
@@ -445,3 +446,49 @@ def _process_data_items(
             events.append(message_chunk(raw_content))
 
     return artifacts, events
+
+
+def _extract_table_rows(value: Any) -> list[dict[str, Any]] | None:
+    """Try to coerce nested JSON structures into table rows."""
+
+    if isinstance(value, list) and value:
+        if all(isinstance(row, dict) for row in value):
+            return [dict(row) for row in value]
+
+        # Handel double-encode results: ["[{...}]"]
+        nested: list[Any] = []
+        all_strings = True
+        for entry in value:
+            if not isinstance(entry, str):
+                all_strings = False
+                break
+            decoded = _decode_nested_json(ContentSerializer.parse_json(entry))
+            nested.append(decoded)
+
+        if all_strings:
+            if nested and len(nested) == 1 and isinstance(nested[0], list):
+                candidate = nested[0]
+                if candidate and all(isinstance(row, dict) for row in candidate):
+                    return [dict(row) for row in candidate]
+            if nested and all(isinstance(row, dict) for row in nested):
+                return [dict(row) for row in nested]
+
+    if isinstance(value, str):
+        return _extract_table_rows(
+            _decode_nested_json(ContentSerializer.parse_json(value))
+        )
+
+    return None
+
+
+def _decode_nested_json(value: Any, *, max_depth: int = 3) -> Any:
+    """Recursively parse JSON strings to handle double-encoded payloads."""
+
+    depth = 0
+    while isinstance(value, str) and depth < max_depth:
+        parsed = ContentSerializer.parse_json(value)
+        if parsed == value:
+            break
+        value = parsed
+        depth += 1
+    return value

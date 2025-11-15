@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openbb_ai.models import (
     SSE,
+    AgentTool,
     LlmClientFunctionCallResultMessage,
     LlmMessage,
     QueryRequest,
@@ -66,8 +67,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         tool_call_id_overrides: dict[str, str] = {}
         for message in self._base_messages:
             if isinstance(message, LlmClientFunctionCallResultMessage):
-                key = hash_tool_call(message.function, message.input_arguments)
-                tool_call_id = self._tool_call_id_from_result(message)
+                result_message = cast(LlmClientFunctionCallResultMessage, message)
+                key = hash_tool_call(
+                    result_message.function, result_message.input_arguments
+                )
+                tool_call_id = self._tool_call_id_from_result(result_message)
                 tool_call_id_overrides[key] = tool_call_id
 
         for message in self._pending_results:
@@ -198,11 +202,21 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             )
         return tuple(toolsets)
 
+    @cached_property
+    def _mcp_tool_lookup(self) -> dict[str, AgentTool]:
+        tools: dict[str, AgentTool] = {}
+        for toolset in self._mcp_toolsets:
+            mapping = getattr(toolset, "tools_by_name", None)
+            if mapping:
+                tools.update(mapping)
+        return tools
+
     def build_event_stream(self) -> OpenBBAIEventStream:
         return OpenBBAIEventStream(
             run_input=self.run_input,
             widget_registry=self._registry,
             pending_results=self._pending_results,
+            mcp_tools=self._mcp_tool_lookup or None,
         )
 
     @cached_property

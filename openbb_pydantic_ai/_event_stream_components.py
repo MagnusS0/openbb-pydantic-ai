@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from openbb_ai.models import Citation, Widget
+from openbb_ai.models import AgentTool, Citation, Widget
 
 from ._event_stream_helpers import ToolCallInfo
 
@@ -104,6 +104,8 @@ class ToolCallTracker:
         tool_name: str,
         args: dict[str, Any],
         widget: Widget | None = None,
+        *,
+        agent_tool: AgentTool | None = None,
     ) -> None:
         """Register a pending tool call.
 
@@ -122,6 +124,7 @@ class ToolCallTracker:
             tool_name=tool_name,
             args=args,
             widget=widget,
+            agent_tool=agent_tool,
         )
 
     def get_call_info(self, tool_call_id: str) -> ToolCallInfo | None:
