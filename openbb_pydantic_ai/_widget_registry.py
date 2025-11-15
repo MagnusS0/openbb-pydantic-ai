@@ -38,6 +38,15 @@ class WidgetRegistry:
         """
         self._by_tool_name: dict[str, Widget] = {}
         self._by_uuid: dict[str, Widget] = {}
+        self._by_origin_id: dict[tuple[str, str], Widget] = {}
+
+        def _register(widget: Widget, *, tool_name: str | None = None) -> None:
+            if tool_name is not None:
+                self._by_tool_name[tool_name] = widget
+            uuid_key = str(widget.uuid)
+            self._by_uuid.setdefault(uuid_key, widget)
+            origin_key = (widget.origin, widget.widget_id)
+            self._by_origin_id.setdefault(origin_key, widget)
 
         # Build lookup from toolsets
         if toolsets:
@@ -45,13 +54,12 @@ class WidgetRegistry:
                 widgets = getattr(toolset, "widgets_by_tool", None)
                 if widgets:
                     for tool_name, widget in widgets.items():
-                        self._by_tool_name[tool_name] = widget
-                        self._by_uuid[str(widget.uuid)] = widget
+                        _register(widget, tool_name=tool_name)
 
         # Also index from collection if provided
         if collection:
             for widget in self._iter_collection(collection):
-                self._by_uuid[str(widget.uuid)] = widget
+                _register(widget)
 
     @staticmethod
     def _iter_collection(collection: WidgetCollection) -> Iterator[Widget]:
@@ -88,6 +96,11 @@ class WidgetRegistry:
             The widget if found, None otherwise
         """
         return self._by_uuid.get(uuid)
+
+    def find_by_origin_and_id(self, origin: str, widget_id: str) -> Widget | None:
+        """Find a widget by its workspace origin/id pair."""
+
+        return self._by_origin_id.get((origin, widget_id))
 
     def find_for_result(
         self, result: LlmClientFunctionCallResultMessage

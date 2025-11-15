@@ -16,11 +16,13 @@ from openbb_ai.helpers import (
 )
 from openbb_ai.models import (
     SSE,
+    Citation,
     LlmClientFunctionCallResultMessage,
     MessageArtifactSSE,
     MessageChunkSSE,
     QueryRequest,
     StatusUpdateSSE,
+    Widget,
     WidgetRequest,
 )
 from pydantic_ai import DeferredToolRequests
@@ -104,35 +106,84 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         self, result_message: LlmClientFunctionCallResultMessage
     ) -> AsyncIterator[SSE]:
         """Process a single deferred result message and yield SSE events."""
-        widget = self.widget_registry.find_for_result(result_message)
-
-        widget_args = extract_widget_args(result_message)
+        widget_entries = self._widget_entries_from_result(result_message)
         content = serialized_content_from_result(result_message)
-        call_info = ToolCallInfo(
-            tool_name=result_message.function,
-            args=widget_args,
-            widget=widget,
-        )
 
-        if widget is not None:
-            citation_details = format_args(widget_args)
-            citation = cite(
-                widget,
-                widget_args,
-                extra_details=citation_details if citation_details else None,
-            )
-            self._citations.add(citation)
-        else:
+        for idx, (widget, widget_args) in enumerate(widget_entries, start=1):
+            if widget is not None:
+                citation_details = format_args(widget_args)
+                citation = cite(
+                    widget,
+                    widget_args,
+                    extra_details=citation_details if citation_details else None,
+                )
+                enriched = self._enrich_citation(widget, citation)
+                self._citations.add(enriched)
+                continue
+
             details = format_args(widget_args)
+            suffix = f" #{idx}" if len(widget_entries) > 1 else ""
+            message = (
+                f"Received result{suffix} for '{result_message.function}' "
+                "without widget metadata"
+            )
             yield reasoning_step(
-                f"Received result for '{result_message.function}' "
-                "without widget metadata",
+                message,
                 details=details if details else None,
                 event_type="WARNING",
             )
 
+        primary_widget: Widget | None = None
+        primary_args: dict[str, Any] = {}
+        if widget_entries:
+            primary_widget = widget_entries[0][0]
+            primary_args = widget_entries[0][1]
+
+        call_args = primary_args if len(widget_entries) == 1 else {}
+        call_info = ToolCallInfo(
+            tool_name=result_message.function,
+            args=call_args,
+            widget=primary_widget if len(widget_entries) == 1 else None,
+        )
+
         for event in self._widget_result_events(call_info, content):
             yield event
+
+    def _widget_entries_from_result(
+        self, result: LlmClientFunctionCallResultMessage
+    ) -> list[tuple[Widget | None, dict[str, Any]]]:
+        if result.function == GET_WIDGET_DATA_TOOL_NAME:
+            data_sources = result.input_arguments.get("data_sources", [])
+            entries: list[tuple[Widget | None, dict[str, Any]]] = []
+
+            if isinstance(data_sources, list):
+                for source in data_sources:
+                    if not isinstance(source, dict):
+                        continue
+
+                    widget: Widget | None = None
+                    widget_uuid = source.get("widget_uuid")
+                    if isinstance(widget_uuid, str):
+                        widget = self.widget_registry.find_by_uuid(widget_uuid)
+
+                    if widget is None:
+                        origin = source.get("origin")
+                        widget_id = source.get("id")
+                        if isinstance(origin, str) and isinstance(widget_id, str):
+                            widget = self.widget_registry.find_by_origin_and_id(
+                                origin, widget_id
+                            )
+
+                    args = source.get("input_args")
+                    args_dict = args if isinstance(args, dict) else {}
+                    entries.append((widget, args_dict))
+
+            if entries:
+                return entries
+
+        widget = self.widget_registry.find_for_result(result)
+        widget_args = extract_widget_args(result)
+        return [(widget, widget_args)]
 
     async def on_error(self, error: Exception) -> AsyncIterator[SSE]:
         yield reasoning_step(str(error), event_type="ERROR")
@@ -316,7 +367,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 call_info.args,
                 extra_details=citation_details if citation_details else None,
             )
-            self._citations.add(citation)
+            enriched = self._enrich_citation(call_info.widget, citation)
+            self._citations.add(enriched)
 
             for sse in self._widget_result_events(call_info, result_part.content):
                 yield sse
@@ -371,3 +423,22 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             content,
             mark_streamed_text=self._record_text_streamed,
         )
+
+    @staticmethod
+    def _enrich_citation(widget: Widget, citation: Citation) -> Citation:
+        """Ensure widget metadata (uuid/name/description) is present in citations."""
+
+        source = citation.source_info
+        updates: dict[str, Any] = {}
+        if source.uuid is None:
+            updates["uuid"] = widget.uuid
+        if source.name is None and widget.name:
+            updates["name"] = widget.name
+        if source.description is None and widget.description:
+            updates["description"] = widget.description
+
+        if not updates:
+            return citation
+
+        enriched_source = source.model_copy(update=updates)
+        return citation.model_copy(update={"source_info": enriched_source})
