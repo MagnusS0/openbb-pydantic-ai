@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 # Tool name constants
 GET_WIDGET_DATA_TOOL_NAME = "get_widget_data"
+CHART_TOOL_NAME = "openbb_create_chart"
+CHART_PLACEHOLDER_TOKEN = "{{openbb_chart}}"  # noqa: S105
 
 # Field exclusion lists for citation and status update details
 CITATION_EXCLUDED_FIELDS = frozenset(

@@ -39,7 +39,11 @@ from pydantic_ai.messages import (
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.ui import UIEventStream
 
-from ._config import GET_WIDGET_DATA_TOOL_NAME
+from ._config import (
+    CHART_PLACEHOLDER_TOKEN,
+    CHART_TOOL_NAME,
+    GET_WIDGET_DATA_TOOL_NAME,
+)
 from ._dependencies import OpenBBDeps
 from ._event_stream_components import (
     CitationCollector,
@@ -77,10 +81,13 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     _tool_calls: ToolCallTracker = field(init=False, default_factory=ToolCallTracker)
     _citations: CitationCollector = field(init=False, default_factory=CitationCollector)
     _thinking: ThinkingBuffer = field(init=False, default_factory=ThinkingBuffer)
+    _queued_viz_artifacts: list[MessageArtifactSSE] = field(
+        init=False, default_factory=list
+    )
+    _placeholder_buffer: str = field(init=False, default="")
 
     # Simple state flags
     _has_streamed_text: bool = field(init=False, default=False)
-    _final_output_pending: str | None = field(init=False, default=None)
     _deferred_results_emitted: bool = field(init=False, default=False)
 
     def encode_event(self, event: SSE) -> str:
@@ -192,13 +199,13 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         self, part: TextPart, follows_text: bool = False
     ) -> AsyncIterator[SSE]:
         if part.content:
-            self._record_text_streamed()
-            yield message_chunk(part.content)
+            for event in self._text_events_with_artifacts(part.content):
+                yield event
 
     async def handle_text_delta(self, delta: TextPartDelta) -> AsyncIterator[SSE]:
         if delta.content_delta:
-            self._record_text_streamed()
-            yield message_chunk(delta.content_delta)
+            for event in self._text_events_with_artifacts(delta.content_delta):
+                yield event
 
     async def handle_thinking_start(
         self,
@@ -253,7 +260,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             return
 
         if isinstance(output, str) and output and not self._has_streamed_text:
-            self._final_output_pending = output
+            events = self._text_events_with_artifacts(output)
+            for sse_event in events:
+                yield sse_event
 
     async def _handle_deferred_tool_requests(
         self, output: DeferredToolRequests
@@ -349,10 +358,16 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if not tool_call_id:
             return
 
-        if isinstance(
-            result_part.content, (MessageArtifactSSE, MessageChunkSSE, StatusUpdateSSE)
-        ):
-            yield result_part.content
+        content = result_part.content
+        if isinstance(content, MessageArtifactSSE):
+            if result_part.tool_name == CHART_TOOL_NAME:
+                self._queued_viz_artifacts.append(content)
+            else:
+                yield content
+            return
+
+        if isinstance(content, (MessageChunkSSE, StatusUpdateSSE)):
+            yield content
             return
 
         call_info = self._tool_calls.get_call_info(tool_call_id)
@@ -388,10 +403,14 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 yield reasoning_step(content)
             self._thinking.clear()
 
-        if self._final_output_pending and not self._has_streamed_text:
-            yield message_chunk(self._final_output_pending)
+        if self._placeholder_buffer:
+            yield self._message_chunk(self._placeholder_buffer)
+            self._placeholder_buffer = ""
 
-        self._final_output_pending = None
+        while self._queued_viz_artifacts:
+            artifact = self._pop_next_viz_artifact()
+            if artifact is not None:
+                yield artifact
 
         # Emit all citations at the end
         if self._citations.has_citations():
@@ -423,6 +442,63 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             content,
             mark_streamed_text=self._record_text_streamed,
         )
+
+    def _text_events_with_artifacts(self, text: str) -> list[SSE]:
+        events: list[SSE] = []
+        if not text:
+            return events
+
+        token = CHART_PLACEHOLDER_TOKEN
+        token_len = len(token)
+        combined = f"{self._placeholder_buffer}{text}"
+        self._placeholder_buffer = ""
+        idx = 0
+
+        while True:
+            next_idx = combined.find(token, idx)
+            if next_idx == -1:
+                break
+
+            segment = combined[idx:next_idx]
+            if segment:
+                events.append(self._message_chunk(segment))
+
+            artifact = self._pop_next_viz_artifact()
+            if artifact is not None:
+                events.append(artifact)
+            else:
+                events.append(self._message_chunk(token))
+
+            idx = next_idx + token_len
+
+        remaining = combined[idx:]
+        if remaining:
+            suffix_len = self._placeholder_suffix_len(remaining)
+            emit_len = len(remaining) - suffix_len
+            if emit_len > 0:
+                events.append(self._message_chunk(remaining[:emit_len]))
+            if suffix_len > 0:
+                self._placeholder_buffer = remaining[-suffix_len:]
+
+        return events
+
+    def _message_chunk(self, content: str) -> MessageChunkSSE:
+        self._record_text_streamed()
+        return message_chunk(content)
+
+    def _pop_next_viz_artifact(self) -> MessageArtifactSSE | None:
+        if self._queued_viz_artifacts:
+            return self._queued_viz_artifacts.pop(0)
+        return None
+
+    @staticmethod
+    def _placeholder_suffix_len(text: str) -> int:
+        token = CHART_PLACEHOLDER_TOKEN
+        max_len = min(len(text), len(token) - 1)
+        for length in range(max_len, 0, -1):
+            if token.startswith(text[-length:]):
+                return length
+        return 0
 
     @staticmethod
     def _enrich_citation(widget: Widget, citation: Citation) -> Citation:

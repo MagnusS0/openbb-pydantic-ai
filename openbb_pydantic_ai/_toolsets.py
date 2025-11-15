@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from openbb_ai.helpers import chart, table
+from openbb_ai.helpers import chart
 from openbb_ai.models import Undefined, Widget, WidgetCollection, WidgetParam
 from pydantic_ai import CallDeferred, Tool
 from pydantic_ai.tools import RunContext
@@ -168,19 +168,10 @@ class WidgetToolset(FunctionToolset[OpenBBDeps]):
 
 
 class VisualizationToolset(FunctionToolset[OpenBBDeps]):
-    """Toolset exposing helper utilities for charts and tables."""
+    """Toolset exposing helper utilities for charts."""
 
     def __init__(self) -> None:
         super().__init__()
-
-        def _create_table(
-            data: list[dict[str, Any]],
-            name: str | None = None,
-            description: str | None = None,
-        ):
-            """Create a table artifact to display in OpenBB Workspace."""
-
-            return table(data=data, name=name, description=description)
 
         def _create_chart(
             type: Literal["line", "bar", "scatter", "pie", "donut"],
@@ -228,7 +219,6 @@ class VisualizationToolset(FunctionToolset[OpenBBDeps]):
                 description=description,
             )
 
-        self.add_function(_create_table, name="openbb_create_table")
         self.add_function(_create_chart, name="openbb_create_chart")
 
 
