@@ -30,6 +30,7 @@ from typing_extensions import override
 
 from ._dependencies import OpenBBDeps, build_deps_from_request
 from ._event_stream import OpenBBAIEventStream
+from ._mcp_toolsets import build_mcp_toolsets
 from ._message_transformer import MessageTransformer
 from ._serializers import ContentSerializer
 from ._toolsets import build_widget_toolsets
@@ -181,6 +182,22 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     def _widget_toolsets(self) -> tuple[FunctionToolset[OpenBBDeps], ...]:
         return build_widget_toolsets(self.run_input.widgets)
 
+    @cached_property
+    def _mcp_toolsets(self) -> tuple[AbstractToolset[Any], ...]:
+        return build_mcp_toolsets(
+            self.run_input.tools,
+            self.run_input.workspace_options,
+        )
+
+    @cached_property
+    def _toolsets(self) -> tuple[AbstractToolset[OpenBBDeps], ...]:
+        toolsets: list[AbstractToolset[OpenBBDeps]] = list(self._widget_toolsets)
+        if self._mcp_toolsets:
+            toolsets.extend(
+                cast("Sequence[AbstractToolset[OpenBBDeps]]", self._mcp_toolsets)
+            )
+        return tuple(toolsets)
+
     def build_event_stream(self) -> OpenBBAIEventStream:
         return OpenBBAIEventStream(
             run_input=self.run_input,
@@ -301,11 +318,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     @cached_property
     def toolset(self) -> AbstractToolset[OpenBBDeps] | None:
         """Build combined toolset from widget toolsets."""
-        if not self._widget_toolsets:
+        if not self._toolsets:
             return None
-        if len(self._widget_toolsets) == 1:
-            return self._widget_toolsets[0]
-        combined = CombinedToolset(self._widget_toolsets)
+        if len(self._toolsets) == 1:
+            return self._toolsets[0]
+        combined = CombinedToolset(self._toolsets)
         return cast(AbstractToolset[OpenBBDeps], combined)
 
     @cached_property
