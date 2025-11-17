@@ -7,7 +7,7 @@ from typing import Any
 
 from openbb_ai.models import AgentTool, Citation, Widget
 
-from ._event_stream_helpers import ToolCallInfo
+from openbb_pydantic_ai._event_stream_helpers import ToolCallInfo
 
 
 @dataclass

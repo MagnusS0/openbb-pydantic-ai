@@ -29,14 +29,14 @@ from pydantic_ai.ui import OnCompleteFunc, UIAdapter
 from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import override
 
-from ._dependencies import OpenBBDeps, build_deps_from_request
-from ._event_stream import OpenBBAIEventStream
-from ._mcp_toolsets import build_mcp_toolsets
-from ._message_transformer import MessageTransformer
-from ._serializers import ContentSerializer
-from ._toolsets import build_widget_toolsets
-from ._utils import hash_tool_call
-from ._widget_registry import WidgetRegistry
+from openbb_pydantic_ai._dependencies import OpenBBDeps, build_deps_from_request
+from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
+from openbb_pydantic_ai._mcp_toolsets import build_mcp_toolsets
+from openbb_pydantic_ai._message_transformer import MessageTransformer
+from openbb_pydantic_ai._serializers import ContentSerializer
+from openbb_pydantic_ai._toolsets import build_widget_toolsets
+from openbb_pydantic_ai._utils import hash_tool_call
+from openbb_pydantic_ai._widget_registry import WidgetRegistry
 
 if TYPE_CHECKING:
     from starlette.requests import Request

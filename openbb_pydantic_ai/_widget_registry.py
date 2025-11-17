@@ -11,12 +11,12 @@ from openbb_ai.models import (
     WidgetCollection,
 )
 
-from ._config import GET_WIDGET_DATA_TOOL_NAME
+from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
 
 if TYPE_CHECKING:
     from pydantic_ai.toolsets import FunctionToolset
 
-    from ._dependencies import OpenBBDeps
+    from openbb_pydantic_ai._dependencies import OpenBBDeps
 
 
 class WidgetRegistry:

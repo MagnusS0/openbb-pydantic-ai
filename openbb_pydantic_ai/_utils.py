@@ -7,11 +7,11 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ._config import (
+from openbb_pydantic_ai._config import (
     MAX_ARG_DISPLAY_CHARS,
     MAX_ARG_PREVIEW_ITEMS,
 )
-from ._serializers import ContentSerializer
+from openbb_pydantic_ai._serializers import ContentSerializer
 
 
 def hash_tool_call(function: str, input_arguments: dict[str, Any]) -> str:

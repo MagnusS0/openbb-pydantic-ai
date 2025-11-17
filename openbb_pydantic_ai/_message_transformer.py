@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.ui import MessagesBuilder
 
-from ._serializers import ContentSerializer
+from openbb_pydantic_ai._serializers import ContentSerializer
 
 
 class MessageTransformer:
@@ -76,7 +76,7 @@ class MessageTransformer:
 
         if isinstance(content, LlmClientFunctionCall):
             # Use override if available, otherwise use base ID
-            from ._utils import hash_tool_call
+            from openbb_pydantic_ai._utils import hash_tool_call
 
             base_id = hash_tool_call(content.function, content.input_arguments)
             tool_call_id = self._overrides.get(base_id, base_id)
@@ -112,7 +112,7 @@ class MessageTransformer:
         message : LlmClientFunctionCallResultMessage
             The result message to add
         """
-        from ._utils import hash_tool_call
+        from openbb_pydantic_ai._utils import hash_tool_call
 
         # Generate base ID and use override if available
         base_id = hash_tool_call(message.function, message.input_arguments)

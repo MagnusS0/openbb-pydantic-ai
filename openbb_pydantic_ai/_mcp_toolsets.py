@@ -10,7 +10,7 @@ from pydantic_ai import CallDeferred, Tool
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ._dependencies import OpenBBDeps
+from openbb_pydantic_ai._dependencies import OpenBBDeps
 
 MCP_WORKSPACE_OPTION = "mcp-tools"
 

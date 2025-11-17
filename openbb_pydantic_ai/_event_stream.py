@@ -42,19 +42,19 @@ from pydantic_ai.messages import (
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.ui import UIEventStream
 
-from ._config import (
+from openbb_pydantic_ai._config import (
     CHART_PLACEHOLDER_TOKEN,
     CHART_TOOL_NAME,
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
 )
-from ._dependencies import OpenBBDeps
-from ._event_stream_components import (
+from openbb_pydantic_ai._dependencies import OpenBBDeps
+from openbb_pydantic_ai._event_stream_components import (
     CitationCollector,
     ThinkingBuffer,
     ToolCallTracker,
 )
-from ._event_stream_helpers import (
+from openbb_pydantic_ai._event_stream_helpers import (
     ToolCallInfo,
     artifact_from_output,
     extract_widget_args,
@@ -62,8 +62,8 @@ from ._event_stream_helpers import (
     serialized_content_from_result,
     tool_result_events_from_content,
 )
-from ._utils import format_args, normalize_args
-from ._widget_registry import WidgetRegistry
+from openbb_pydantic_ai._utils import format_args, normalize_args
+from openbb_pydantic_ai._widget_registry import WidgetRegistry
 
 
 def _encode_sse(event: SSE) -> str:
