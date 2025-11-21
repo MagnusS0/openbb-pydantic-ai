@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 from openbb_ai.models import AgentTool
@@ -83,13 +84,12 @@ class MCPToolset(FunctionToolset[OpenBBDeps]):
             self._tools_by_name[built.name] = tool
             self._registered_tools[built.name] = built
 
-    @property
-    def tools_by_name(self) -> Mapping[str, AgentTool]:
-        return self._tools_by_name
-
-    @property
-    def registered_tools(self) -> Mapping[str, Tool]:
-        return self._registered_tools
+        self.tools_by_name: Mapping[str, AgentTool] = MappingProxyType(
+            self._tools_by_name
+        )
+        self.registered_tools: Mapping[str, Tool] = MappingProxyType(
+            self._registered_tools
+        )
 
 
 def build_mcp_toolsets(

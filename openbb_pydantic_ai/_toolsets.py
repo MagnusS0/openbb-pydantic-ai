@@ -4,31 +4,23 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any, Literal
 
 from openbb_ai.helpers import chart
 from openbb_ai.models import Undefined, Widget, WidgetCollection, WidgetParam
-from pydantic_ai import CallDeferred, Tool
+from pydantic import BaseModel, model_validator
+from pydantic_ai import CallDeferred, Tool, ToolReturn
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ._dependencies import OpenBBDeps
+from openbb_pydantic_ai._config import PARAM_TYPE_SCHEMA_MAP
+from openbb_pydantic_ai._dependencies import OpenBBDeps
 
 
 def _base_param_schema(param: WidgetParam) -> dict[str, Any]:
     """Build the base JSON schema for a widget parameter."""
-    type_mapping: dict[str, dict[str, Any]] = {
-        "string": {"type": "string"},
-        "text": {"type": "string"},
-        "number": {"type": "number"},
-        "integer": {"type": "integer"},
-        "boolean": {"type": "boolean"},
-        "date": {"type": "string", "format": "date"},
-        "ticker": {"type": "string"},
-        "endpoint": {"type": "string"},
-    }
-
-    schema = type_mapping.get(param.type, {"type": "string"})
+    schema = PARAM_TYPE_SCHEMA_MAP.get(param.type, {"type": "string"})
     schema = dict(schema)  # copy
     schema["description"] = param.description
 
@@ -66,6 +58,7 @@ def _param_schema(param: WidgetParam) -> tuple[dict[str, Any], bool]:
 
 
 def _widget_schema(widget: Widget) -> dict[str, Any]:
+    """Build the JSON schema for a widget's parameters."""
     properties: dict[str, Any] = {}
     required: list[str] = []
 
@@ -93,24 +86,28 @@ def _slugify(value: str) -> str:
 
 
 def build_widget_tool_name(widget: Widget) -> str:
-    """Generate a deterministic tool name for a widget.
+    """Generate a deterministic (and reasonably short) widget tool name.
 
-    The tool name is constructed as: openbb_widget_{origin}_{widget_id}
-    where both origin and widget_id are slugified.
-
-    Parameters
-    ----------
-    widget : Widget
-        The widget to generate a tool name for
-
-    Returns
-    -------
-    str
-        A unique, deterministic tool name string
+    Names always start with the ``openbb_widget`` prefix so Workspace can route
+    them, followed by the widget identifier and, when helpful, a trimmed origin
+    slug. When the origin already starts with ``openbb_`` (e.g. ``OpenBB Sandbox``)
+    the redundant ``openbb`` portion is removed to avoid unwieldy names like
+    ``openbb_widget_openbb_sandbox_*``.
     """
+
     origin_slug = _slugify(widget.origin)
+    if origin_slug.startswith("openbb_"):
+        origin_slug = origin_slug.removeprefix("openbb_")
+    elif origin_slug == "openbb":
+        origin_slug = ""
+
     widget_slug = _slugify(widget.widget_id)
-    return f"openbb_widget_{origin_slug}_{widget_slug}"
+
+    parts = ["openbb", "widget"]
+    if origin_slug:
+        parts.append(origin_slug)
+    parts.append(widget_slug)
+    return "_".join(parts)
 
 
 def build_widget_tool(widget: Widget) -> Tool:
@@ -150,6 +147,63 @@ def build_widget_tool(widget: Widget) -> Tool:
     )
 
 
+class ChartParams(BaseModel):
+    """Validation model for chart creation parameters."""
+
+    type: Literal["line", "bar", "scatter", "pie", "donut"]
+    data: list[dict[str, Any]]
+    x_key: str | None = None
+    y_keys: list[str] | None = None
+    angle_key: str | None = None
+    callout_label_key: str | None = None
+    name: str | None = None
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def validate_chart_keys(self) -> ChartParams:
+        if self.type in {"line", "bar", "scatter"}:
+            if not self.x_key:
+                raise ValueError("x_key is required for line, bar, and scatter charts")
+            if not self.y_keys:
+                raise ValueError("y_keys is required for line, bar, and scatter charts")
+        elif self.type in {"pie", "donut"}:
+            if not self.angle_key:
+                raise ValueError("angle_key is required for pie and donut charts")
+            if not self.callout_label_key:
+                raise ValueError(
+                    "callout_label_key is required for pie and donut charts"
+                )
+        return self
+
+
+def _create_chart(ctx: RunContext[OpenBBDeps], params: ChartParams) -> ToolReturn:
+    """
+    Create a chart artifact (line, bar, scatter, pie, donut).
+
+    Required params for line, bar, scatter charts: x_key, y_keys.
+    Required params for pie, donut charts: angle_key, callout_label_key.
+
+    Always requires:
+    - type: Chart type (line, bar, scatter, pie, donut)
+    - data: List of data points (dictionaries)
+    """
+    return ToolReturn(
+        return_value="Chart created successfully.",
+        metadata={
+            "chart": chart(
+                type=params.type,
+                data=params.data,
+                x_key=params.x_key,
+                y_keys=params.y_keys,
+                angle_key=params.angle_key,
+                callout_label_key=params.callout_label_key,
+                name=params.name,
+                description=params.description,
+            )
+        },
+    )
+
+
 class WidgetToolset(FunctionToolset[OpenBBDeps]):
     """Toolset that exposes widgets as deferred tools."""
 
@@ -162,64 +216,9 @@ class WidgetToolset(FunctionToolset[OpenBBDeps]):
             self.add_tool(tool)
             self._widgets_by_tool[tool.name] = widget
 
-    @property
-    def widgets_by_tool(self) -> Mapping[str, Widget]:
-        return self._widgets_by_tool
-
-
-class VisualizationToolset(FunctionToolset[OpenBBDeps]):
-    """Toolset exposing helper utilities for charts."""
-
-    def __init__(self) -> None:
-        super().__init__()
-
-        def _create_chart(
-            type: Literal["line", "bar", "scatter", "pie", "donut"],
-            data: list[dict[str, Any]],
-            x_key: str | None = None,
-            y_keys: list[str] | None = None,
-            angle_key: str | None = None,
-            callout_label_key: str | None = None,
-            name: str | None = None,
-            description: str | None = None,
-        ):
-            """Create a chart artifact (line, bar, scatter, pie, donut).
-
-            Raises
-            ------
-            ValueError
-                If required parameters for the given chart ``type`` are missing.
-            """
-
-            if type in {"line", "bar", "scatter"}:
-                if not x_key:
-                    raise ValueError(
-                        "x_key is required for line, bar, and scatter charts"
-                    )
-                if not y_keys:
-                    raise ValueError(
-                        "y_keys is required for line, bar, and scatter charts"
-                    )
-            elif type in {"pie", "donut"}:
-                if not angle_key:
-                    raise ValueError("angle_key is required for pie and donut charts")
-                if not callout_label_key:
-                    raise ValueError(
-                        "callout_label_key is required for pie and donut charts"
-                    )
-
-            return chart(
-                type=type,
-                data=data,
-                x_key=x_key,
-                y_keys=y_keys,
-                angle_key=angle_key,
-                callout_label_key=callout_label_key,
-                name=name,
-                description=description,
-            )
-
-        self.add_function(_create_chart, name="openbb_create_chart")
+        self.widgets_by_tool: Mapping[str, Widget] = MappingProxyType(
+            self._widgets_by_tool
+        )
 
 
 def build_widget_toolsets(
@@ -241,14 +240,17 @@ def build_widget_toolsets(
     tuple[FunctionToolset[OpenBBDeps], ...]
         Toolsets including widget toolsets and visualization toolset
     """
+    viz_toolset = FunctionToolset[OpenBBDeps]()
+    viz_toolset.add_function(_create_chart, name="openbb_create_chart")
+
     if collection is None:
-        return (VisualizationToolset(),)
+        return (viz_toolset,)
 
     toolsets: list[FunctionToolset[OpenBBDeps]] = []
     for widgets in (collection.primary, collection.secondary, collection.extra):
         if widgets:
             toolsets.append(WidgetToolset(widgets))
 
-    toolsets.append(VisualizationToolset())
+    toolsets.append(viz_toolset)
 
     return tuple(toolsets)

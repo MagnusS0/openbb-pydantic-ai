@@ -14,6 +14,8 @@ from openbb_ai.models import (
     ClientArtifact,
     LlmClientFunctionCallResultMessage,
     MessageArtifactSSE,
+    StatusUpdateSSE,
+    StatusUpdateSSEData,
     Widget,
 )
 
@@ -49,6 +51,16 @@ class ToolCallInfo:
     args: dict[str, Any]
     widget: Widget | None = None
     agent_tool: AgentTool | None = None
+
+
+@dataclass(slots=True)
+class WidgetInvocation:
+    """Represents a single widget invocation extracted from a result message."""
+
+    widget_uuid: str
+    origin: str
+    widget_id: str
+    args: dict[str, Any]
 
 
 def find_widget_for_result(
@@ -203,6 +215,7 @@ def tool_result_events_from_content(
     content: Any,
     *,
     mark_streamed_text: TextStreamCallback,
+    widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None = None,
 ) -> list[SSE]:
     """Transform tool result payloads into SSE events.
 
@@ -215,6 +228,9 @@ def tool_result_events_from_content(
         The tool result content to transform
     mark_streamed_text : TextStreamCallback
         Callback to mark that text has been streamed
+    widget_entries : list[tuple[Widget | None, dict[str, Any]]] | None
+        Optional list of widget entries corresponding to the content items.
+        Used to resolve widget names when missing from the content.
 
     Returns
     -------
@@ -231,7 +247,7 @@ def tool_result_events_from_content(
     events: list[SSE] = []
     artifacts: list[ClientArtifact] = []
 
-    for entry in data_entries:
+    for i, entry in enumerate(data_entries):
         if not isinstance(entry, dict):
             continue
 
@@ -239,7 +255,29 @@ def tool_result_events_from_content(
         if command_event:
             events.append(command_event)
 
-        entry_artifacts, entry_events = _process_data_items(entry, mark_streamed_text)
+        error_event = _process_error_result(entry)
+        if error_event:
+            events.append(error_event)
+            continue
+
+        # Determine context for this entry
+        current_entries = None
+        default_widget = None
+
+        if widget_entries:
+            if len(data_entries) == 1:
+                # Single entry, items inside map to widget_entries
+                current_entries = widget_entries
+            elif len(data_entries) == len(widget_entries):
+                # Multiple entries, assume 1-to-1 mapping
+                default_widget = widget_entries[i][0]
+
+        entry_artifacts, entry_events = _process_data_items(
+            entry,
+            mark_streamed_text,
+            widget_entries=current_entries,
+            default_widget=default_widget,
+        )
         artifacts.extend(entry_artifacts)
         events.extend(entry_events)
 
@@ -366,6 +404,32 @@ def _process_command_result(entry: dict[str, Any]) -> SSE | None:
     return None
 
 
+def _process_error_result(entry: dict[str, Any]) -> SSE | None:
+    """Process error result messages.
+
+    Parameters
+    ----------
+    entry : dict[str, Any]
+        Data entry potentially containing error_type and content fields
+
+    Returns
+    -------
+    SSE | None
+        Reasoning step event if error found, None otherwise
+    """
+    error_type = entry.get("error_type")
+    content = entry.get("content")
+    if error_type and content:
+        return StatusUpdateSSE(
+            data=StatusUpdateSSEData(
+                eventType="ERROR",
+                message=str(content),
+                details=[{"error_type": error_type}],
+            )
+        )
+    return None
+
+
 def _dict_items_to_rows(data: Mapping[str, Any]) -> list[dict[str, str]]:
     """Convert a mapping into key/value rows for table rendering."""
 
@@ -380,8 +444,69 @@ def _dict_items_to_rows(data: Mapping[str, Any]) -> list[dict[str, str]]:
     return rows
 
 
+def _try_expand_mapping(
+    data: dict[str, Any],
+    base_name: str | None,
+    base_description: str | None,
+) -> list[ClientArtifact] | None:
+    """Attempt to expand a dictionary into multiple table artifacts."""
+
+    should_expand = False
+    for value in data.values():
+        if _extract_table_rows(value) is not None:
+            should_expand = True
+            break
+        if isinstance(value, dict):
+            should_expand = True
+            break
+
+    if not should_expand:
+        return None
+
+    artifacts: list[ClientArtifact] = []
+    for key, value in data.items():
+        name = f"{base_name}_{key}" if base_name else key
+        description = f"{base_description} - {key}" if base_description else key
+
+        rows = _extract_table_rows(value)
+        if rows:
+            artifacts.append(
+                ClientArtifact(
+                    type="table",
+                    name=name,
+                    description=description,
+                    content=rows,
+                )
+            )
+        elif isinstance(value, dict):
+            kv_rows = _dict_items_to_rows(value)
+            if kv_rows:
+                artifacts.append(
+                    ClientArtifact(
+                        type="table",
+                        name=name,
+                        description=description,
+                        content=kv_rows,
+                    )
+                )
+        else:
+            artifacts.append(
+                ClientArtifact(
+                    type="table",
+                    name=name,
+                    description=description,
+                    content=[{"Field": "Value", "Value": format_arg_value(value)}],
+                )
+            )
+
+    return artifacts
+
+
 def _process_data_items(
-    entry: dict[str, Any], mark_streamed_text: TextStreamCallback
+    entry: dict[str, Any],
+    mark_streamed_text: TextStreamCallback,
+    widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None = None,
+    default_widget: Widget | None = None,
 ) -> tuple[list[ClientArtifact], list[SSE]]:
     """Process data items from a data entry into artifacts or SSE events.
 
@@ -394,6 +519,11 @@ def _process_data_items(
         Data entry containing an 'items' field with content
     mark_streamed_text : TextStreamCallback
         Callback to mark that text has been streamed
+    widget_entries : list[tuple[Widget | None, dict[str, Any]]] | None
+        Optional list of widget entries to resolve missing names
+    default_widget : Widget | None
+        Optional default widget to use if name is missing and widget_entries
+        cannot be used for resolution.
 
     Returns
     -------
@@ -407,7 +537,7 @@ def _process_data_items(
     artifacts: list[ClientArtifact] = []
     events: list[SSE] = []
 
-    for item in items:
+    for idx, item in enumerate(items):
         if not isinstance(item, dict):
             continue
 
@@ -415,32 +545,85 @@ def _process_data_items(
         if not isinstance(raw_content, str):
             continue
 
-        parsed = _decode_nested_json(ContentSerializer.parse_json(raw_content))
+        # Resolve name if missing
+        name = item.get("name")
+
+        resolved_widget = None
+        if default_widget:
+            resolved_widget = default_widget
+        elif widget_entries and idx < len(widget_entries):
+            resolved_widget = widget_entries[idx][0]
+
+        if not name and resolved_widget:
+            name = resolved_widget.name
+
+        display_name = name or "unknown"
+
+        data_format = item.get("data_format", {})
+        parse_as = data_format.get("parse_as")
+        data_type = data_format.get("data_type")
+
+        if parse_as == "text":
+            mark_streamed_text()
+            events.append(message_chunk(raw_content))
+            continue
+
+        if data_type and data_type not in ("object", "json"):
+            events.append(
+                reasoning_step(
+                    f"Format '{data_type}' not implemented", event_type="WARNING"
+                )
+            )
+            continue
+
+        try:
+            parsed = _decode_nested_json(json.loads(raw_content))
+        except (json.JSONDecodeError, ValueError):
+            events.append(
+                StatusUpdateSSE(
+                    data=StatusUpdateSSEData(
+                        eventType="WARNING",
+                        message=(f"Failed to parse content for '{display_name}'"),
+                        details=[{"name": display_name}],
+                    )
+                )
+            )
+            mark_streamed_text()
+            events.append(message_chunk(raw_content))
+            continue
 
         table_rows = _extract_table_rows(parsed)
         if table_rows is not None:
             artifacts.append(
                 ClientArtifact(
                     type="table",
-                    name=item.get("name") or f"Table_{uuid4().hex[:4]}",
+                    name=name or item.get("name") or f"Table_{uuid4().hex[:4]}",
                     description=item.get("description") or "Widget data",
                     content=table_rows,
                 )
             )
         elif isinstance(parsed, dict):
-            rows = _dict_items_to_rows(parsed)
-            if rows:
-                artifacts.append(
-                    ClientArtifact(
-                        type="table",
-                        name=item.get("name") or f"Details_{uuid4().hex[:4]}",
-                        description=item.get("description") or "Widget data",
-                        content=rows,
-                    )
-                )
+            expanded = _try_expand_mapping(
+                parsed, name or item.get("name"), item.get("description")
+            )
+            if expanded:
+                artifacts.extend(expanded)
             else:
-                mark_streamed_text()
-                events.append(message_chunk(json.dumps(parsed)))
+                rows = _dict_items_to_rows(parsed)
+                if rows:
+                    artifacts.append(
+                        ClientArtifact(
+                            type="table",
+                            name=(
+                                name or item.get("name") or f"Details_{uuid4().hex[:4]}"
+                            ),
+                            description=item.get("description") or "Widget data",
+                            content=rows,
+                        )
+                    )
+                else:
+                    mark_streamed_text()
+                    events.append(message_chunk(json.dumps(parsed)))
         else:
             mark_streamed_text()
             events.append(message_chunk(raw_content))
@@ -474,9 +657,10 @@ def _extract_table_rows(value: Any) -> list[dict[str, Any]] | None:
                 return [dict(row) for row in nested]
 
     if isinstance(value, str):
-        return _extract_table_rows(
-            _decode_nested_json(ContentSerializer.parse_json(value))
-        )
+        parsed = _decode_nested_json(ContentSerializer.parse_json(value))
+        if parsed == value:
+            return None
+        return _extract_table_rows(parsed)
 
     return None
 

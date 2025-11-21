@@ -53,25 +53,21 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     # Initialized in __post_init__
     _transformer: MessageTransformer = field(init=False)
     _registry: WidgetRegistry = field(init=False)
-    _base_messages: list[LlmMessage] = field(init=False, default_factory=list)
-    _pending_results: list[LlmClientFunctionCallResultMessage] = field(
-        init=False, default_factory=list
-    )
+    _base_messages: list[LlmMessage] = field(init=False)
+    _pending_results: list[LlmClientFunctionCallResultMessage] = field(init=False)
 
     def __post_init__(self) -> None:
-        base, pending = self._split_messages(self.run_input.messages)
-        self._base_messages = base
-        self._pending_results = pending
+        (
+            self._base_messages,
+            self._pending_results,
+        ) = self._split_messages(self.run_input.messages)
 
         # Build tool call ID overrides for consistent IDs
         tool_call_id_overrides: dict[str, str] = {}
         for message in self._base_messages:
             if isinstance(message, LlmClientFunctionCallResultMessage):
-                result_message = cast(LlmClientFunctionCallResultMessage, message)
-                key = hash_tool_call(
-                    result_message.function, result_message.input_arguments
-                )
-                tool_call_id = self._tool_call_id_from_result(result_message)
+                key = hash_tool_call(message.function, message.input_arguments)
+                tool_call_id = self._tool_call_id_from_result(message)
                 tool_call_id_overrides[key] = tool_call_id
 
         for message in self._pending_results:
@@ -90,6 +86,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
     @classmethod
     def build_run_input(cls, body: bytes) -> QueryRequest:
+        """Parse the raw request body into a ``QueryRequest`` instance."""
+
         return QueryRequest.model_validate_json(body)
 
     @classmethod
@@ -126,13 +124,10 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         # Treat only the trailing tool results (those after the final assistant
         # message) as pending. Leave them in the base history so the next model
         # call still sees the complete tool call/result exchange.
-        idx = len(base) - 1
-        while idx >= 0:
-            message = base[idx]
+        for message in reversed(base):
             if not isinstance(message, LlmClientFunctionCallResultMessage):
                 break
-            pending.insert(0, cast(LlmClientFunctionCallResultMessage, message))
-            idx -= 1
+            pending.insert(0, message)
 
         return base, pending
 
@@ -178,7 +173,9 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             return False
         tail = self._base_messages[-pending_len:]
         return all(
-            orig is pending
+            isinstance(orig, LlmClientFunctionCallResultMessage)
+            and orig.function == pending.function
+            and orig.input_arguments == pending.input_arguments
             for orig, pending in zip(tail, self._pending_results, strict=True)
         )
 
@@ -212,6 +209,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         return tools
 
     def build_event_stream(self) -> OpenBBAIEventStream:
+        """Create the event stream wrapper for this adapter run."""
+
         return OpenBBAIEventStream(
             run_input=self.run_input,
             widget_registry=self._registry,
@@ -342,9 +341,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     @cached_property
     def state(self) -> dict[str, Any] | None:
         """Extract workspace state as a dictionary."""
-        if self.run_input.workspace_state is None:
-            return None
-        return self.run_input.workspace_state.model_dump(exclude_none=True)
+        return (
+            self.run_input.workspace_state.model_dump(exclude_none=True)
+            if self.run_input.workspace_state
+            else None
+        )
 
     @classmethod
     async def dispatch_request(

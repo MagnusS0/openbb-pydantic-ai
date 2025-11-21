@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from openbb_ai.models import LlmClientFunctionCallResultMessage
 
-from ._types import SerializedContent
+from openbb_pydantic_ai._types import SerializedContent
 
 
 class ContentSerializer:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,7 +11,6 @@ from openbb_ai.helpers import (
     citations,
     cite,
     get_widget_data,
-    message_chunk,
     reasoning_step,
 )
 from openbb_ai.models import (
@@ -43,8 +42,10 @@ from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.ui import UIEventStream
 
 from openbb_pydantic_ai._config import (
-    CHART_PLACEHOLDER_TOKEN,
     CHART_TOOL_NAME,
+    EVENT_TYPE_ERROR,
+    EVENT_TYPE_THINKING,
+    EVENT_TYPE_WARNING,
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
 )
@@ -62,6 +63,7 @@ from openbb_pydantic_ai._event_stream_helpers import (
     serialized_content_from_result,
     tool_result_events_from_content,
 )
+from openbb_pydantic_ai._stream_parser import StreamParser
 from openbb_pydantic_ai._utils import format_args, normalize_args
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 
@@ -89,17 +91,17 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     _queued_viz_artifacts: list[MessageArtifactSSE] = field(
         init=False, default_factory=list
     )
-    _placeholder_buffer: str = field(init=False, default="")
+    _stream_parser: StreamParser = field(init=False, default_factory=StreamParser)
 
     # Simple state flags
     _has_streamed_text: bool = field(init=False, default=False)
     _deferred_results_emitted: bool = field(init=False, default=False)
+    _final_output: str | None = field(init=False, default=None)
 
     def encode_event(self, event: SSE) -> str:
         return _encode_sse(event)
 
     def _record_text_streamed(self) -> None:
-        """Record that text content has been streamed to the client."""
         self._has_streamed_text = True
 
     async def before_stream(self) -> AsyncIterator[SSE]:
@@ -119,26 +121,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     ) -> AsyncIterator[SSE]:
         """Process a single deferred result message and yield SSE events."""
         if result_message.function == EXECUTE_MCP_TOOL_NAME:
-            tool_name = result_message.input_arguments.get("tool_name")
-            parameters = result_message.input_arguments.get("parameters", {})
-            args = normalize_args(parameters)
-            agent_tool = (
-                self._find_agent_tool(tool_name)
-                if tool_name and self.mcp_tools
-                else None
-            )
-            call_info = ToolCallInfo(
-                tool_name=tool_name or EXECUTE_MCP_TOOL_NAME,
-                args=args,
-                agent_tool=agent_tool,
-            )
-            content = serialized_content_from_result(result_message)
-            for sse in handle_generic_tool_result(
-                call_info,
-                content,
-                mark_streamed_text=self._record_text_streamed,
-            ):
-                yield sse
+            async for event in self._process_mcp_result(result_message):
+                yield event
             return
 
         widget_entries = self._widget_entries_from_result(result_message)
@@ -165,7 +149,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield reasoning_step(
                 message,
                 details=details if details else None,
-                event_type="WARNING",
+                event_type=EVENT_TYPE_WARNING,
             )
 
         primary_widget: Widget | None = None
@@ -181,8 +165,33 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             widget=primary_widget if len(widget_entries) == 1 else None,
         )
 
-        for event in self._widget_result_events(call_info, content):
+        for event in self._widget_result_events(
+            call_info, content, widget_entries=widget_entries
+        ):
             yield event
+
+    async def _process_mcp_result(
+        self, result_message: LlmClientFunctionCallResultMessage
+    ) -> AsyncIterator[SSE]:
+        """Process a deferred MCP tool result."""
+        tool_name = result_message.input_arguments.get("tool_name")
+        parameters = result_message.input_arguments.get("parameters", {})
+        args = normalize_args(parameters)
+        agent_tool = (
+            self._find_agent_tool(tool_name) if tool_name and self.mcp_tools else None
+        )
+        call_info = ToolCallInfo(
+            tool_name=tool_name or EXECUTE_MCP_TOOL_NAME,
+            args=args,
+            agent_tool=agent_tool,
+        )
+        content = serialized_content_from_result(result_message)
+        for sse in handle_generic_tool_result(
+            call_info,
+            content,
+            mark_streamed_text=self._record_text_streamed,
+        ):
+            yield sse
 
     def _widget_entries_from_result(
         self, result: LlmClientFunctionCallResultMessage
@@ -262,7 +271,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         )
 
     async def on_error(self, error: Exception) -> AsyncIterator[SSE]:
-        yield reasoning_step(str(error), event_type="ERROR")
+        yield reasoning_step(str(error), event_type=EVENT_TYPE_ERROR)
 
     async def handle_text_start(
         self, part: TextPart, follows_text: bool = False
@@ -284,8 +293,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         self._thinking.clear()
         if part.content:
             self._thinking.append(part.content)
-        return
-        yield  # pragma: no cover
+        # yield needed to make this an async generator
+        if False:
+            yield
 
     async def handle_thinking_delta(
         self,
@@ -293,8 +303,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     ) -> AsyncIterator[SSE]:
         if delta.content_delta:
             self._thinking.append(delta.content_delta)
-        return
-        yield  # pragma: no cover
+        # yield needed to make this an async generator
+        if False:
+            yield
 
     async def handle_thinking_end(
         self,
@@ -306,8 +317,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             content = self._thinking.get_content()
 
         if content:
-            details = {"Thinking": content}
-            yield reasoning_step("Thinking", details=details)
+            details = {EVENT_TYPE_THINKING: content}
+            yield reasoning_step(EVENT_TYPE_THINKING, details=details)
 
         self._thinking.clear()
 
@@ -329,9 +340,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             return
 
         if isinstance(output, str) and output and not self._has_streamed_text:
-            events = self._text_events_with_artifacts(output)
-            for sse_event in events:
-                yield sse_event
+            self._final_output = output
 
     async def _handle_deferred_tool_requests(
         self, output: DeferredToolRequests
@@ -438,7 +447,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     if isinstance(content, str)
                     else json.dumps(content, default=str)
                 )
-                yield reasoning_step(message, event_type="ERROR")
+                yield reasoning_step(message, event_type=EVENT_TYPE_ERROR)
             return
 
         if not isinstance(result_part, ToolReturnPart):
@@ -448,12 +457,27 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if not tool_call_id:
             return
 
+        if result_part.tool_name == CHART_TOOL_NAME:
+            metadata = getattr(result_part, "metadata", {}) or {}
+            chart_artifact = metadata.get("chart")
+            if isinstance(chart_artifact, MessageArtifactSSE):
+                self._queued_viz_artifacts.append(chart_artifact)
+                for sse_event in self._emit_placeholder_artifact():
+                    yield sse_event
+
+            content = result_part.content
+            if isinstance(content, MessageArtifactSSE):
+                self._queued_viz_artifacts.append(content)
+                for sse_event in self._emit_placeholder_artifact():
+                    yield sse_event
+                return
+
+            if isinstance(chart_artifact, MessageArtifactSSE):
+                return
+
         content = result_part.content
         if isinstance(content, MessageArtifactSSE):
-            if result_part.tool_name == CHART_TOOL_NAME:
-                self._queued_viz_artifacts.append(content)
-            else:
-                yield content
+            yield content
             return
 
         if isinstance(content, (MessageChunkSSE, StatusUpdateSSE)):
@@ -475,7 +499,12 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             enriched = self._enrich_citation(call_info.widget, citation)
             self._citations.add(enriched)
 
-            for sse in self._widget_result_events(call_info, result_part.content):
+            widget_entries: list[tuple[Widget | None, dict[str, Any]]] = [
+                (call_info.widget, call_info.args)
+            ]
+            for sse in self._widget_result_events(
+                call_info, result_part.content, widget_entries=widget_entries
+            ):
                 yield sse
             return
 
@@ -493,9 +522,10 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 yield reasoning_step(content)
             self._thinking.clear()
 
-        if self._placeholder_buffer:
-            yield self._message_chunk(self._placeholder_buffer)
-            self._placeholder_buffer = ""
+        # Flush any remaining text in the parser buffer
+        if self._has_streamed_text or self._final_output is None:
+            for event in self._stream_parser.flush(self._record_text_streamed):
+                yield event
 
         while self._queued_viz_artifacts:
             artifact = self._pop_next_viz_artifact()
@@ -507,8 +537,10 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield citations(self._citations.get_all())
             self._citations.clear()
 
-        return
-        yield  # pragma: no cover
+        if self._final_output and not self._has_streamed_text:
+            events = self._text_events_with_artifacts(self._final_output)
+            for event in events:
+                yield event
 
     def _artifact_from_output(self, output: Any) -> SSE | None:
         """Create an artifact (chart or table) from agent output if possible."""
@@ -518,11 +550,14 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         self,
         call_info: ToolCallInfo,
         content: Any,
+        widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None = None,
     ) -> list[SSE]:
         """Emit SSE events for widget results with graceful fallbacks."""
 
         events = tool_result_events_from_content(
-            content, mark_streamed_text=self._record_text_streamed
+            content,
+            mark_streamed_text=self._record_text_streamed,
+            widget_entries=widget_entries,
         )
         if events:
             return events
@@ -534,61 +569,25 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         )
 
     def _text_events_with_artifacts(self, text: str) -> list[SSE]:
-        events: list[SSE] = []
-        if not text:
-            return events
+        return self._stream_parser.parse(
+            text,
+            self._artifact_generator(),
+            on_text_streamed=self._record_text_streamed,
+        )
 
-        token = CHART_PLACEHOLDER_TOKEN
-        token_len = len(token)
-        combined = f"{self._placeholder_buffer}{text}"
-        self._placeholder_buffer = ""
-        idx = 0
-
-        while True:
-            next_idx = combined.find(token, idx)
-            if next_idx == -1:
-                break
-
-            segment = combined[idx:next_idx]
-            if segment:
-                events.append(self._message_chunk(segment))
-
-            artifact = self._pop_next_viz_artifact()
-            if artifact is not None:
-                events.append(artifact)
-            else:
-                events.append(self._message_chunk(token))
-
-            idx = next_idx + token_len
-
-        remaining = combined[idx:]
-        if remaining:
-            suffix_len = self._placeholder_suffix_len(remaining)
-            emit_len = len(remaining) - suffix_len
-            if emit_len > 0:
-                events.append(self._message_chunk(remaining[:emit_len]))
-            if suffix_len > 0:
-                self._placeholder_buffer = remaining[-suffix_len:]
-
-        return events
-
-    def _message_chunk(self, content: str) -> MessageChunkSSE:
-        self._record_text_streamed()
-        return message_chunk(content)
+    def _artifact_generator(self) -> Iterator[MessageArtifactSSE]:
+        while self._queued_viz_artifacts:
+            yield self._queued_viz_artifacts.pop(0)
 
     def _pop_next_viz_artifact(self) -> MessageArtifactSSE | None:
         if self._queued_viz_artifacts:
             return self._queued_viz_artifacts.pop(0)
         return None
 
-    @staticmethod
-    def _placeholder_suffix_len(text: str) -> int:
-        token = CHART_PLACEHOLDER_TOKEN
-        max_len = min(len(text), len(token) - 1)
-        for length in range(max_len, 0, -1):
-            if token.startswith(text[-length:]):
-                return length
-        return 0
+    def _emit_placeholder_artifact(self) -> list[SSE]:
+        if not self._stream_parser.has_pending_placeholder():
+            return []
+        return self._text_events_with_artifacts("")
 
     @staticmethod
     def _enrich_citation(widget: Widget, citation: Citation) -> Citation:
