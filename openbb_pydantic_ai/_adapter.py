@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
+from datetime import datetime
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
+from zoneinfo import ZoneInfo
 
 from openbb_ai.models import (
     SSE,
@@ -12,6 +14,7 @@ from openbb_ai.models import (
     LlmMessage,
     QueryRequest,
     Undefined,
+    Widget,
 )
 from pydantic_ai import DeferredToolResults
 from pydantic_ai.agent import AbstractAgent
@@ -19,7 +22,6 @@ from pydantic_ai.agent.abstract import Instructions
 from pydantic_ai.builtin_tools import AbstractBuiltinTool
 from pydantic_ai.messages import (
     ModelMessage,
-    SystemPromptPart,
 )
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.output import OutputSpec
@@ -224,7 +226,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         from pydantic_ai.ui import MessagesBuilder
 
         builder = MessagesBuilder()
-        self._add_context_prompts(builder)
 
         # Use transformer to convert messages with ID overrides
         transformed = self._transformer.transform_batch(self._base_messages)
@@ -234,9 +235,17 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         return builder.messages
 
-    def _add_context_prompts(self, builder) -> None:
-        """Add system prompts with workspace context, URLs, and dashboard info."""
+    @cached_property
+    def instructions(self) -> str:
+        """Build runtime instructions with workspace context and dashboard info."""
         lines: list[str] = []
+
+        lines.append("Following is context about the current active OpenBB Workspace:")
+
+        if self.deps.timezone:
+            lines.append(f"The user is in timezone: {self.deps.timezone}")
+            current_time = datetime.now(ZoneInfo(self.deps.timezone)).isoformat()
+            lines.append(f"Current date and time: {current_time}")
 
         if self.deps.context:
             lines.append("<workspace_context>")
@@ -252,24 +261,71 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             lines.append(f"Relevant URLs: {joined}")
             lines.append("</relevant_urls>")
 
-        widget_defaults = self._widget_default_lines()
-        if widget_defaults:
-            lines.append("<widget_defaults>")
-            lines.append(
-                "Preloaded widget values (reuse unless the user requests different data):"  # noqa: E501
-            )
-            lines.extend(widget_defaults)
-            lines.append("</widget_defaults>")
-
         workspace_state = self.deps.workspace_state
-        if workspace_state and workspace_state.current_dashboard_info:
-            dashboard = workspace_state.current_dashboard_info
-            lines.append(
-                f"Active dashboard: {dashboard.name} (tab {dashboard.current_tab_id})"
-            )
+        dashboard = workspace_state.current_dashboard_info if workspace_state else None
 
-        if lines:
-            builder.add(SystemPromptPart(content="\n".join(lines)))
+        if dashboard:
+            lines.extend(self._dashboard_context_lines(dashboard))
+        else:
+            widget_defaults = self._widget_default_lines()
+            if widget_defaults:
+                lines.append("<widget_defaults>")
+                lines.append(
+                    "Preloaded widget values (reuse unless the user requests different data):"  # noqa: E501
+                )
+                lines.extend(widget_defaults)
+                lines.append("</widget_defaults>")
+
+        return "\n".join(lines)
+
+    def _dashboard_context_lines(self, dashboard: Any) -> list[str]:
+        """Build prompt lines for dashboard info and widget values."""
+        lines = ["<dashboard_info>"]
+        lines.append(f"Active dashboard: {dashboard.name}")
+        lines.append(f"Current tab: {dashboard.current_tab_id}")
+        lines.append("")
+
+        processed_uuids = set()
+
+        if dashboard.tabs:
+            lines.append("Widgets by Tab:")
+            for tab in dashboard.tabs:
+                lines.append(f"## {tab.tab_id}")
+
+                if not tab.widgets:
+                    lines.append("(No widgets)")
+                    continue
+
+                for widget_ref in tab.widgets:
+                    widget = self.deps.get_widget_by_uuid(widget_ref.widget_uuid)
+                    if widget:
+                        processed_uuids.add(str(widget.uuid))
+                        params_str = self._format_widget_params(widget)
+                        name = widget_ref.name or widget.name or widget.widget_id
+                        if params_str:
+                            lines.append(f"- {name}: {params_str}")
+                        else:
+                            lines.append(f"- {name}")
+                    else:
+                        lines.append(f"- {widget_ref.name}")
+                lines.append("")
+
+        # Handle widgets not in dashboard
+        all_widgets = list(self.deps.iter_widgets())
+        orphan_widgets = [w for w in all_widgets if str(w.uuid) not in processed_uuids]
+
+        if orphan_widgets:
+            lines.append("Other Available Widgets:")
+            for widget in orphan_widgets:
+                params_str = self._format_widget_params(widget)
+                name = widget.name or widget.widget_id
+                if params_str:
+                    lines.append(f"- {name}: {params_str}")
+                else:
+                    lines.append(f"- {name}")
+
+        lines.append("</dashboard_info>")
+        return lines
 
     def _widget_default_lines(self) -> list[str]:
         """Build prompt lines summarizing current or default widget parameter values."""
@@ -280,40 +336,46 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         lines: list[str] = []
         for widget in widgets_iter:
-            params = getattr(widget, "params", None)
-            if not params:
-                continue
-
-            param_entries: list[str] = []
-            for param in params:
-                source: str | None = None
-                value: Any | None = None
-
-                if param.current_value is not None:
-                    source = "current"
-                    value = param.current_value
-                elif param.default_value is not Undefined.UNDEFINED:
-                    source = "default"
-                    value = param.default_value
-
-                if value is None:
-                    continue
-
-                formatted_value = self._format_widget_value(value)
-                entry = f"{param.name}={formatted_value}"
-                if source == "current":
-                    entry += " (current)"
-                elif source == "default":
-                    entry += " (default)"
-                param_entries.append(entry)
-
-            if not param_entries:
-                continue
-
-            widget_name = widget.name or widget.widget_id
-            lines.append(f"- {widget_name}: {', '.join(param_entries)}")
+            params_str = self._format_widget_params(widget)
+            if params_str:
+                widget_name = widget.name or widget.widget_id
+                lines.append(f"- {widget_name}: {params_str}")
 
         return lines
+
+    def _format_widget_params(self, widget: Widget) -> str | None:
+        """Format widget parameters into a string."""
+        params = getattr(widget, "params", None)
+        if not params:
+            return None
+
+        param_entries: list[str] = []
+        for param in params:
+            source: str | None = None
+            value: Any | None = None
+
+            if param.current_value is not None:
+                source = "current"
+                value = param.current_value
+            elif param.default_value is not Undefined.UNDEFINED:
+                source = "default"
+                value = param.default_value
+
+            if value is None:
+                continue
+
+            formatted_value = self._format_widget_value(value)
+            entry = f"{param.name}={formatted_value}"
+            if source == "current":
+                entry += ""
+            elif source == "default":
+                entry += " (no current value showing default)"
+            param_entries.append(entry)
+
+        if not param_entries:
+            return None
+
+        return ", ".join(param_entries)
 
     @staticmethod
     def _format_widget_value(value: Any) -> str:
@@ -413,12 +475,24 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
+        # Merge dynamic dashboard context with caller-provided instructions
+        combined_instructions = self.instructions
+        if instructions:
+            if isinstance(instructions, str):
+                # Avoid duplication if caller already merged context
+                if combined_instructions not in instructions:
+                    combined_instructions = f"{combined_instructions}\n\n{instructions}"
+                else:
+                    combined_instructions = instructions
+            elif isinstance(instructions, list):
+                combined_instructions = [combined_instructions] + instructions
+
         return super().run_stream_native(
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
             model=model,
-            instructions=instructions,
+            instructions=combined_instructions,
             deps=resolved_deps,
             model_settings=model_settings,
             usage_limits=usage_limits,
@@ -451,12 +525,24 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
         message_history = message_history or self.messages
 
+        # Merge dynamic dashboard context with caller-provided instructions
+        combined_instructions = self.instructions
+        if instructions:
+            if isinstance(instructions, str):
+                # Avoid duplication if caller already merged context
+                if combined_instructions not in instructions:
+                    combined_instructions = f"{combined_instructions}\n\n{instructions}"
+                else:
+                    combined_instructions = instructions
+            elif isinstance(instructions, list):
+                combined_instructions = [combined_instructions] + instructions
+
         return super().run_stream(
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
             model=model,
-            instructions=instructions,
+            instructions=combined_instructions,
             deps=resolved_deps,
             model_settings=model_settings,
             usage_limits=usage_limits,

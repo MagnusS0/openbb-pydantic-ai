@@ -89,28 +89,13 @@ def build_widget_tool_name(widget: Widget) -> str:
     """Generate a deterministic (and reasonably short) widget tool name.
 
     Names always start with the ``openbb_widget`` prefix so Workspace can route
-    them, followed by the widget identifier and, when helpful, a trimmed origin
-    slug. When the origin already starts with ``openbb_`` (e.g. ``OpenBB Sandbox``)
-    the redundant ``openbb`` portion is removed to avoid unwieldy names like
-    ``openbb_widget_openbb_sandbox_*``.
+    them, followed by the widget identifier.
     """
-
-    origin_slug = _slugify(widget.origin)
-    if origin_slug.startswith("openbb_"):
-        origin_slug = origin_slug.removeprefix("openbb_")
-    elif origin_slug == "openbb":
-        origin_slug = ""
-
     widget_slug = _slugify(widget.widget_id)
-
-    parts = ["openbb", "widget"]
-    if origin_slug:
-        parts.append(origin_slug)
-    parts.append(widget_slug)
-    return "_".join(parts)
+    return f"openbb_widget_{widget_slug}"
 
 
-def build_widget_tool(widget: Widget) -> Tool:
+def build_widget_tool(widget: Widget, tool_name_override: str | None = None) -> Tool:
     """Create a deferred tool for a widget.
 
     This creates a Pydantic AI tool that will be called by the LLM but
@@ -120,13 +105,15 @@ def build_widget_tool(widget: Widget) -> Tool:
     ----------
     widget : Widget
         The widget to create a tool for
+    tool_name_override : str | None
+        Optional override for the tool name (e.g. to handle collisions)
 
     Returns
     -------
     Tool
         A Tool configured for deferred execution
     """
-    tool_name = build_widget_tool_name(widget)
+    tool_name = tool_name_override or build_widget_tool_name(widget)
     schema = _widget_schema(widget)
     description = widget.description or widget.name
 
@@ -210,9 +197,19 @@ class WidgetToolset(FunctionToolset[OpenBBDeps]):
     def __init__(self, widgets: Sequence[Widget]):
         super().__init__()
         self._widgets_by_tool: dict[str, Widget] = {}
+        used_names: set[str] = set()
 
         for widget in widgets:
-            tool = build_widget_tool(widget)
+            base_name = build_widget_tool_name(widget)
+            name = base_name
+            counter = 1
+            while name in used_names:
+                counter += 1
+                name = f"{base_name}_{counter}"
+
+            used_names.add(name)
+
+            tool = build_widget_tool(widget, tool_name_override=name)
             self.add_tool(tool)
             self._widgets_by_tool[tool.name] = widget
 
