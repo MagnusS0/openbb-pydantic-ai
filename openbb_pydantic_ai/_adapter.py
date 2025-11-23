@@ -223,17 +223,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     @cached_property
     def messages(self) -> list[ModelMessage]:
         """Build message history with context prompts."""
-        from pydantic_ai.ui import MessagesBuilder
-
-        builder = MessagesBuilder()
-
-        # Use transformer to convert messages with ID overrides
-        transformed = self._transformer.transform_batch(self._base_messages)
-        for msg in transformed:
-            for part in msg.parts:
-                builder.add(part)
-
-        return builder.messages
+        return self._transformer.transform_batch(self._base_messages)
 
     @cached_property
     def instructions(self) -> str:
@@ -473,7 +463,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         """
         resolved_deps: OpenBBDeps = deps or self.deps
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
-        message_history = message_history or self.messages
 
         # Merge dynamic dashboard context with caller-provided instructions
         combined_instructions = self.instructions
@@ -523,7 +512,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
         resolved_deps: OpenBBDeps = deps or self.deps
         deferred_tool_results = deferred_tool_results or self.deferred_tool_results
-        message_history = message_history or self.messages
 
         # Merge dynamic dashboard context with caller-provided instructions
         combined_instructions = self.instructions
