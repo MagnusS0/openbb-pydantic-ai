@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
@@ -10,13 +10,13 @@ from zoneinfo import ZoneInfo
 from openbb_ai.models import (
     SSE,
     AgentTool,
+    DashboardInfo,
     LlmClientFunctionCallResultMessage,
     LlmMessage,
     QueryRequest,
     Undefined,
     Widget,
 )
-from pydantic_ai import DeferredToolResults
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.agent.abstract import Instructions
 from pydantic_ai.builtin_tools import AbstractBuiltinTool
@@ -26,7 +26,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.output import OutputSpec
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
+from pydantic_ai.toolsets import AbstractToolset, CombinedToolset
 from pydantic_ai.ui import OnCompleteFunc, UIAdapter
 from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import override
@@ -35,21 +35,20 @@ from openbb_pydantic_ai._dependencies import OpenBBDeps, build_deps_from_request
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
 from openbb_pydantic_ai._mcp_toolsets import build_mcp_toolsets
 from openbb_pydantic_ai._message_transformer import MessageTransformer
-from openbb_pydantic_ai._serializers import ContentSerializer
-from openbb_pydantic_ai._toolsets import build_widget_toolsets
-from openbb_pydantic_ai._utils import hash_tool_call
+from openbb_pydantic_ai._viz_toolsets import build_viz_toolsets
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
+from openbb_pydantic_ai._widget_toolsets import build_widget_toolsets
 
 if TYPE_CHECKING:
+    from pydantic_ai import DeferredToolResults
     from starlette.requests import Request
     from starlette.responses import Response
 
 
-@dataclass
+@dataclass(kw_only=True)
 class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any]):
     """UI adapter that bridges OpenBB Workspace requests with Pydantic AI."""
 
-    _: KW_ONLY
     accept: str | None = None
 
     # Initialized in __post_init__
@@ -64,23 +63,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             self._pending_results,
         ) = self._split_messages(self.run_input.messages)
 
-        # Build tool call ID overrides for consistent IDs
-        tool_call_id_overrides: dict[str, str] = {}
-        for message in self._base_messages:
-            if isinstance(message, LlmClientFunctionCallResultMessage):
-                key = hash_tool_call(message.function, message.input_arguments)
-                tool_call_id = self._tool_call_id_from_result(message)
-                tool_call_id_overrides[key] = tool_call_id
-
-        for message in self._pending_results:
-            key = hash_tool_call(message.function, message.input_arguments)
-            tool_call_id_overrides.setdefault(
-                key,
-                self._tool_call_id_from_result(message),
-            )
-
         # Initialize transformer and registry
-        self._transformer = MessageTransformer(tool_call_id_overrides)
+        self._transformer = MessageTransformer()
         self._registry = WidgetRegistry(
             collection=self.run_input.widgets,
             toolsets=self._widget_toolsets,
@@ -89,15 +73,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     @classmethod
     def build_run_input(cls, body: bytes) -> QueryRequest:
         """Parse the raw request body into a ``QueryRequest`` instance."""
-
         return QueryRequest.model_validate_json(body)
 
     @classmethod
     def load_messages(cls, messages: Sequence[LlmMessage]) -> list[ModelMessage]:
-        """Convert OpenBB messages to Pydantic AI messages.
-
-        Note: This creates a transformer without overrides for standalone use.
-        """
+        """Convert OpenBB messages to Pydantic AI messages."""
         transformer = MessageTransformer()
         return transformer.transform_batch(messages)
 
@@ -133,68 +113,26 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         return base, pending
 
-    def _tool_call_id_from_result(
-        self, message: LlmClientFunctionCallResultMessage
-    ) -> str:
-        """Extract or generate a tool call ID from a result message."""
-        extra_id = (
-            message.extra_state.get("tool_call_id") if message.extra_state else None
-        )
-        if isinstance(extra_id, str):
-            return extra_id
-        return hash_tool_call(message.function, message.input_arguments)
-
     @cached_property
     def deps(self) -> OpenBBDeps:
         return build_deps_from_request(self.run_input)
 
     @cached_property
-    def deferred_tool_results(self) -> DeferredToolResults | None:
-        """Build deferred tool results from pending result messages."""
-        if not self._pending_results:
-            return None
-
-        # When those trailing results already sit in the base history, skip
-        # emitting DeferredToolResults; resending them would show up as a
-        # conflicting duplicate tool response upstream.
-        if self._pending_results_are_in_history():
-            return None
-
-        results = DeferredToolResults()
-        for message in self._pending_results:
-            actual_id = self._tool_call_id_from_result(message)
-            serialized = ContentSerializer.serialize_result(message)
-            results.calls[actual_id] = serialized
-        return results
-
-    def _pending_results_are_in_history(self) -> bool:
-        if not self._pending_results:
-            return False
-        pending_len = len(self._pending_results)
-        if pending_len > len(self._base_messages):
-            return False
-        tail = self._base_messages[-pending_len:]
-        return all(
-            isinstance(orig, LlmClientFunctionCallResultMessage)
-            and orig.function == pending.function
-            and orig.input_arguments == pending.input_arguments
-            for orig, pending in zip(tail, self._pending_results, strict=True)
-        )
-
-    @cached_property
-    def _widget_toolsets(self) -> tuple[FunctionToolset[OpenBBDeps], ...]:
+    def _widget_toolsets(self) -> tuple[AbstractToolset[OpenBBDeps], ...]:
         return build_widget_toolsets(self.run_input.widgets)
 
     @cached_property
+    def _viz_toolset(self) -> AbstractToolset[OpenBBDeps]:
+        return build_viz_toolsets()
+
+    @cached_property
     def _mcp_toolsets(self) -> tuple[AbstractToolset[Any], ...]:
-        return build_mcp_toolsets(
-            self.run_input.tools,
-            self.run_input.workspace_options,
-        )
+        return build_mcp_toolsets(self.run_input.tools)
 
     @cached_property
     def _toolsets(self) -> tuple[AbstractToolset[OpenBBDeps], ...]:
         toolsets: list[AbstractToolset[OpenBBDeps]] = list(self._widget_toolsets)
+        toolsets.append(self._viz_toolset)
         if self._mcp_toolsets:
             toolsets.extend(
                 cast("Sequence[AbstractToolset[OpenBBDeps]]", self._mcp_toolsets)
@@ -268,7 +206,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         return "\n".join(lines)
 
-    def _dashboard_context_lines(self, dashboard: Any) -> list[str]:
+    def _dashboard_context_lines(self, dashboard: DashboardInfo) -> list[str]:
         """Build prompt lines for dashboard info and widget values."""
         lines = ["<dashboard_info>"]
         lines.append(f"Active dashboard: {dashboard.name}")
@@ -356,10 +294,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
             formatted_value = self._format_widget_value(value)
             entry = f"{param.name}={formatted_value}"
-            if source == "current":
-                entry += ""
-            elif source == "default":
-                entry += " (no current value showing default)"
+            if source == "default":
+                entry += " (default)"
             param_entries.append(entry)
 
         if not param_entries:
@@ -462,7 +398,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         deps, messages, and deferred results.
         """
         resolved_deps: OpenBBDeps = deps or self.deps
-        deferred_tool_results = deferred_tool_results or self.deferred_tool_results
 
         # Merge dynamic dashboard context with caller-provided instructions
         combined_instructions = self.instructions
@@ -511,7 +446,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     ):
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
         resolved_deps: OpenBBDeps = deps or self.deps
-        deferred_tool_results = deferred_tool_results or self.deferred_tool_results
 
         # Merge dynamic dashboard context with caller-provided instructions
         combined_instructions = self.instructions
