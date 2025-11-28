@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from openbb_ai.models import AgentTool
 from pydantic_ai import Agent
@@ -12,18 +14,25 @@ from openbb_pydantic_ai._mcp_toolsets import build_mcp_toolsets
 pytestmark = pytest.mark.anyio
 
 
-def _tool(**overrides) -> AgentTool:
-    defaults = {
-        "server_id": "1761162970409",
-        "name": "database-connector_get_databases",
-        "url": "http://localhost:8001/mcp/",
-        "description": None,
-        "endpoint": None,
-        "input_schema": None,
-        "auth_token": None,
-    }
-    defaults.update(overrides)
-    return AgentTool(**defaults)
+def _tool(
+    *,
+    server_id: str | None = "1761162970409",
+    name: str = "database-connector_get_databases",
+    url: str = "http://localhost:8001/mcp/",
+    description: str | None = None,
+    endpoint: str | None = None,
+    input_schema: dict[str, Any] | None = None,
+    auth_token: str | None = None,
+) -> AgentTool:
+    return AgentTool(
+        server_id=server_id,
+        name=name,
+        url=url,
+        description=description,
+        endpoint=endpoint,
+        input_schema=input_schema,
+        auth_token=auth_token,
+    )
 
 
 def test_build_mcp_toolsets_allows_empty_options_with_tools() -> None:
@@ -93,7 +102,7 @@ async def test_mcp_toolset_registers_tools_with_agent() -> None:
     toolsets = build_mcp_toolsets(tools)
 
     model = TestModel(call_tools=[], custom_output_text="done")
-    agent = Agent(
+    agent = Agent[OpenBBDeps, str](
         model,
         deps_type=OpenBBDeps,
         toolsets=toolsets,
