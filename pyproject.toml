@@ -1,6 +1,6 @@
 [project]
 name = "openbb-pydantic-ai"
-version = "0.1.5"
+version = "0.1.6"
 description = "Pydantic AI adapter for OpenBB SDK. Enables connettion any pydantic-ai agent to the OpenBB Workspace."
 authors = [
     { name = "Magnus Samuelsen" }
