@@ -1,6 +1,6 @@
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/username/repository)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/MagnusS0/openbb-pydantic-ai)
 
 
 # OpenBB Pydantic AI Adapter
