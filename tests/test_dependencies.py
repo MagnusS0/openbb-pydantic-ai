@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from openbb_ai.models import LlmClientMessage, QueryRequest, RawContext, RoleEnum
 
-from openbb_pydantic_ai import build_deps_from_request
+from openbb_pydantic_ai._dependencies import build_deps_from_request
 
 
 def test_build_deps_from_request(sample_context: RawContext) -> None:
@@ -18,4 +18,4 @@ def test_build_deps_from_request(sample_context: RawContext) -> None:
     assert deps.timezone == "America/New_York"
     assert deps.urls == ["https://example.com"]
     assert deps.context and deps.context[0].name == "Test Context"
-    assert deps.state == {}, "Workspace state defaults to empty dict when absent"
+    assert deps.state == {}

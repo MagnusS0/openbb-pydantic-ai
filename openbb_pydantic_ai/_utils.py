@@ -2,43 +2,26 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
-from ._config import (
+from openbb_ai.models import (
+    LlmClientFunctionCallResultMessage,
+    Widget,
+    WidgetCollection,
+)
+
+from openbb_pydantic_ai._config import (
     MAX_ARG_DISPLAY_CHARS,
     MAX_ARG_PREVIEW_ITEMS,
 )
-from ._serializers import ContentSerializer
+from openbb_pydantic_ai._serializers import parse_json, to_json
 
 
-def hash_tool_call(function: str, input_arguments: dict[str, Any]) -> str:
-    """Generate a deterministic hash-based ID for a tool call.
-
-    This creates a unique identifier by hashing the function name and arguments,
-    ensuring consistent tool call IDs across message history and deferred results.
-
-    Parameters
-    ----------
-    function : str
-        The name of the function/tool being called
-    input_arguments : dict[str, Any]
-        The arguments passed to the tool
-
-    Returns
-    -------
-    str
-        A string combining the function name with a 16-character hash digest
-    """
-    payload = json.dumps(
-        {"function": function, "input_arguments": input_arguments},
-        sort_keys=True,
-        default=str,
-    )
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"{function}_{digest[:16]}"
+def iter_widget_collection(collection: WidgetCollection) -> Iterator[Widget]:
+    """Iterate all widgets in a collection across priority groups."""
+    for group in (collection.primary, collection.secondary, collection.extra):
+        yield from group
 
 
 def normalize_args(args: Any) -> dict[str, Any]:
@@ -46,13 +29,35 @@ def normalize_args(args: Any) -> dict[str, Any]:
     if isinstance(args, dict):
         return args
     if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-            if isinstance(parsed, dict):
-                return parsed
-        except ValueError:
-            pass
+        parsed = parse_json(args)
+        if isinstance(parsed, dict):
+            return parsed
     return {}
+
+
+def extract_tool_call_id(message: LlmClientFunctionCallResultMessage) -> str:
+    """Extract the tool_call_id from a result message or raise if missing."""
+
+    extra_state = message.extra_state or {}
+    if isinstance(extra_state, dict):
+        extra_id = extra_state.get("tool_call_id")
+        if isinstance(extra_id, str):
+            return extra_id
+
+        tool_calls = extra_state.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            first = tool_calls[0]
+            if isinstance(first, dict):
+                tcid = first.get("tool_call_id")
+                if isinstance(tcid, str):
+                    return tcid
+
+    raise ValueError(
+        """
+        `tool_call_id` is required for deferred tool results but was not found
+        in message.extra_state
+        """.strip()
+    )
 
 
 def get_str(mapping: Mapping[str, Any], *keys: str) -> str | None:
@@ -83,10 +88,6 @@ def _truncate(value: str, max_chars: int = 160) -> str:
     return value[: max_chars - 3] + "..."
 
 
-def _json_dump(value: Any) -> str:
-    return ContentSerializer.to_json(value)
-
-
 def format_arg_value(
     value: Any,
     *,
@@ -99,7 +100,7 @@ def format_arg_value(
         return _truncate(value, max_chars)
 
     if isinstance(value, (int, float, bool)) or value is None:
-        return _json_dump(value)
+        return to_json(value)
 
     if isinstance(value, Mapping):
         keys = list(value.keys())
@@ -107,7 +108,7 @@ def format_arg_value(
         preview = {k: value[k] for k in preview_keys}
         suffix = "..." if len(keys) > max_items else ""
         return _truncate(
-            f"dict(keys={preview_keys}{suffix}, sample={_json_dump(preview)})",
+            f"dict(keys={preview_keys}{suffix}, sample={to_json(preview)})",
             max_chars,
         )
 
@@ -116,11 +117,11 @@ def format_arg_value(
         preview = seq[:max_items]
         suffix = "..." if len(seq) > max_items else ""
         return _truncate(
-            f"list(len={len(seq)}{suffix}, sample={_json_dump(preview)})",
+            f"list(len={len(seq)}{suffix}, sample={to_json(preview)})",
             max_chars,
         )
 
-    return _truncate(_json_dump(value), max_chars)
+    return _truncate(to_json(value), max_chars)
 
 
 def format_args(args: Mapping[str, Any]) -> dict[str, str]:

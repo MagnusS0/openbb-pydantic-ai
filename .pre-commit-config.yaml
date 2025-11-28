@@ -22,5 +22,12 @@ repos:
         language: python
         entry: ty check
         pass_filenames: false
-        args: [--python=.venv/, --exclude, tests/]
+        # args must be a list of strings; don't embed a YAML list inside the args list
+        # pass multiple --exclude entries so each pattern is a string
+        args:
+          - "--python=.venv/"
+          - "--exclude"
+          - "tests/"
+          - "--exclude"
+          - "examples/"
         additional_dependencies: [ty]

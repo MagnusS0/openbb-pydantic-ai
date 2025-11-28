@@ -19,14 +19,6 @@ class SerializedContent(TypedDict):
     extra_state: NotRequired[dict[str, Any]]
 
 
-class ToolCallMetadata(TypedDict):
-    """Metadata for tracking tool calls in flight."""
-
-    tool_call_id: str
-    widget_uuid: str
-    widget_id: str
-
-
 class TextStreamCallback(Protocol):
     """Protocol for callbacks that mark text as having been streamed."""
 

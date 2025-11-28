@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from collections.abc import AsyncIterator
+from typing import Any, Callable, Sequence
 from uuid import uuid4
 
 import pytest
@@ -58,3 +59,50 @@ def make_request() -> Callable[..., QueryRequest]:
 @pytest.fixture
 def human_message() -> LlmClientMessage:
     return LlmClientMessage(role=RoleEnum.human, content="Hello")
+
+
+class AgentStreamStub:
+    """Lightweight stub that mimics Agent.run_stream_events for unit tests."""
+
+    def __init__(
+        self,
+        stream_fn: Callable[..., AsyncIterator[Any]],
+        output_type: Any | None = None,
+    ) -> None:
+        self._stream_fn = stream_fn
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.output_type = output_type if output_type is not None else object()
+
+    def run_stream_events(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        self.calls.append((args, kwargs))
+        return self._stream_fn(*args, **kwargs)
+
+
+@pytest.fixture
+def agent_stream_stub() -> AgentStreamStub:
+    async def _empty_stream(*, message_history=None, **_: Any) -> AsyncIterator[Any]:
+        assert message_history is not None
+        if False:
+            yield
+
+    return AgentStreamStub(_empty_stream)
+
+
+@pytest.fixture
+def widget_with_origin(sample_widget: Widget) -> Callable[[str, str], Widget]:
+    def _factory(origin: str, widget_id: str = "financial_statements") -> Widget:
+        if hasattr(sample_widget, "model_copy"):
+            return sample_widget.model_copy(
+                update={"origin": origin, "widget_id": widget_id}
+            )
+        clone = Widget(**sample_widget.__dict__)
+        clone.origin = origin
+        clone.widget_id = widget_id
+        return clone
+
+    return _factory
+
+
+@pytest.fixture(scope="session")
+def anyio_backend() -> str:
+    return "asyncio"
