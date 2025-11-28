@@ -48,13 +48,10 @@ from openbb_pydantic_ai._config import (
     EVENT_TYPE_WARNING,
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
+    TABLE_TOOL_NAME,
 )
 from openbb_pydantic_ai._dependencies import OpenBBDeps
-from openbb_pydantic_ai._event_stream_components import (
-    CitationCollector,
-    ThinkingBuffer,
-    ToolCallTracker,
-)
+from openbb_pydantic_ai._event_stream_components import StreamState
 from openbb_pydantic_ai._event_stream_helpers import (
     ToolCallInfo,
     artifact_from_output,
@@ -85,9 +82,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     mcp_tools: Mapping[str, AgentTool] | None = None
 
     # State management components
-    _tool_calls: ToolCallTracker = field(init=False, default_factory=ToolCallTracker)
-    _citations: CitationCollector = field(init=False, default_factory=CitationCollector)
-    _thinking: ThinkingBuffer = field(init=False, default_factory=ThinkingBuffer)
+    _state: StreamState = field(init=False, default_factory=StreamState)
     _queued_viz_artifacts: list[MessageArtifactSSE] = field(
         init=False, default_factory=list
     )
@@ -137,7 +132,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     extra_details=citation_details if citation_details else None,
                 )
                 enriched = self._enrich_citation(widget, citation)
-                self._citations.add(enriched)
+                self._state.add_citation(enriched)
                 continue
 
             details = format_args(widget_args)
@@ -209,14 +204,6 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     widget_uuid = source.get("widget_uuid")
                     if isinstance(widget_uuid, str):
                         widget = self.widget_registry.find_by_uuid(widget_uuid)
-
-                    if widget is None:
-                        origin = source.get("origin")
-                        widget_id = source.get("id")
-                        if isinstance(origin, str) and isinstance(widget_id, str):
-                            widget = self.widget_registry.find_by_origin_and_id(
-                                origin, widget_id
-                            )
 
                     args = source.get("input_args")
                     args_dict = args if isinstance(args, dict) else {}
@@ -290,9 +277,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         part: ThinkingPart,
         follows_thinking: bool = False,
     ) -> AsyncIterator[SSE]:
-        self._thinking.clear()
+        self._state.clear_thinking()
         if part.content:
-            self._thinking.append(part.content)
+            self._state.add_thinking(part.content)
         # yield needed to make this an async generator
         if False:
             yield
@@ -302,7 +289,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         delta: ThinkingPartDelta,
     ) -> AsyncIterator[SSE]:
         if delta.content_delta:
-            self._thinking.append(delta.content_delta)
+            self._state.add_thinking(delta.content_delta)
         # yield needed to make this an async generator
         if False:
             yield
@@ -312,15 +299,15 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         part: ThinkingPart,
         followed_by_thinking: bool = False,
     ) -> AsyncIterator[SSE]:
-        content = part.content or self._thinking.get_content()
-        if not content and not self._thinking.is_empty():
-            content = self._thinking.get_content()
+        content = part.content or self._state.get_thinking()
+        if not content and self._state.has_thinking():
+            content = self._state.get_thinking()
 
         if content:
             details = {EVENT_TYPE_THINKING: content}
             yield reasoning_step(EVENT_TYPE_THINKING, details=details)
 
-        self._thinking.clear()
+        self._state.clear_thinking()
 
     async def handle_run_result(
         self, event: AgentRunResultEvent[Any]
@@ -358,7 +345,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     continue
 
                 args = normalize_args(call.args)
-                self._tool_calls.register_call(
+                self._state.register_tool_call(
                     tool_call_id=call.tool_call_id,
                     tool_name=call.tool_name,
                     args=args,
@@ -370,7 +357,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
             args = normalize_args(call.args)
             widget_requests.append(WidgetRequest(widget=widget, input_arguments=args))
-            self._tool_calls.register_call(
+            self._state.register_tool_call(
                 tool_call_id=call.tool_call_id,
                 tool_name=call.tool_name,
                 args=args,
@@ -407,6 +394,18 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 args=args,
             )
 
+    def _build_mcp_call_info(
+        self, tool_name: str | None, args: dict[str, Any]
+    ) -> ToolCallInfo:
+        agent_tool = (
+            self._find_agent_tool(tool_name) if tool_name and self.mcp_tools else None
+        )
+        return ToolCallInfo(
+            tool_name=tool_name or EXECUTE_MCP_TOOL_NAME,
+            args=args,
+            agent_tool=agent_tool,
+        )
+
     async def handle_function_tool_call(
         self, event: FunctionToolCallEvent
     ) -> AsyncIterator[SSE]:
@@ -420,11 +419,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             return
 
         tool_call_id = part.tool_call_id
-        if not tool_call_id or self._tool_calls.has_pending(tool_call_id):
+        if not tool_call_id or self._state.has_tool_call(tool_call_id):
             return
 
         args = normalize_args(part.args)
-        self._tool_calls.register_call(
+        self._state.register_tool_call(
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             args=args,
@@ -457,11 +456,17 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if not tool_call_id:
             return
 
-        if result_part.tool_name == CHART_TOOL_NAME:
+        viz_tools = {
+            CHART_TOOL_NAME: "chart",
+            TABLE_TOOL_NAME: "table",
+        }
+
+        if result_part.tool_name in viz_tools:
+            key = viz_tools[result_part.tool_name]
             metadata = getattr(result_part, "metadata", {}) or {}
-            chart_artifact = metadata.get("chart")
-            if isinstance(chart_artifact, MessageArtifactSSE):
-                self._queued_viz_artifacts.append(chart_artifact)
+            viz_artifact = metadata.get(key)
+            if isinstance(viz_artifact, MessageArtifactSSE):
+                self._queued_viz_artifacts.append(viz_artifact)
                 for sse_event in self._emit_placeholder_artifact():
                     yield sse_event
 
@@ -472,7 +477,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     yield sse_event
                 return
 
-            if isinstance(chart_artifact, MessageArtifactSSE):
+            if isinstance(viz_artifact, MessageArtifactSSE):
                 return
 
         content = result_part.content
@@ -484,7 +489,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield content
             return
 
-        call_info = self._tool_calls.get_call_info(tool_call_id)
+        call_info = self._state.get_tool_call(tool_call_id)
         if call_info is None:
             return
 
@@ -497,7 +502,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 extra_details=citation_details if citation_details else None,
             )
             enriched = self._enrich_citation(call_info.widget, citation)
-            self._citations.add(enriched)
+            self._state.add_citation(enriched)
 
             widget_entries: list[tuple[Widget | None, dict[str, Any]]] = [
                 (call_info.widget, call_info.args)
@@ -516,11 +521,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield sse
 
     async def after_stream(self) -> AsyncIterator[SSE]:
-        if not self._thinking.is_empty():
-            content = self._thinking.get_content()
+        if self._state.has_thinking():
+            content = self._state.get_thinking()
             if content:
                 yield reasoning_step(content)
-            self._thinking.clear()
+            self._state.clear_thinking()
 
         # Flush any remaining text in the parser buffer
         if self._has_streamed_text or self._final_output is None:
@@ -533,9 +538,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 yield artifact
 
         # Emit all citations at the end
-        if self._citations.has_citations():
-            yield citations(self._citations.get_all())
-            self._citations.clear()
+        if self._state.has_citations():
+            yield citations(self._state.get_citations())
+            self._state.clear_citations()
 
         if self._final_output and not self._has_streamed_text:
             events = self._text_events_with_artifacts(self._final_output)

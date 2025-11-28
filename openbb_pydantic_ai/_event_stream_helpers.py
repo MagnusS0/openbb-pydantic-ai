@@ -19,9 +19,8 @@ from openbb_ai.models import (
     Widget,
 )
 
-from ._config import GET_WIDGET_DATA_TOOL_NAME
-from ._event_builder import EventBuilder
-from ._serializers import ContentSerializer
+from ._config import EVENT_TYPE_ERROR, GET_WIDGET_DATA_TOOL_NAME
+from ._serializers import parse_json, serialize_result, to_string
 from ._types import SerializedContent, TextStreamCallback
 from ._utils import (
     format_arg_value,
@@ -51,53 +50,6 @@ class ToolCallInfo:
     args: dict[str, Any]
     widget: Widget | None = None
     agent_tool: AgentTool | None = None
-
-
-@dataclass(slots=True)
-class WidgetInvocation:
-    """Represents a single widget invocation extracted from a result message."""
-
-    widget_uuid: str
-    origin: str
-    widget_id: str
-    args: dict[str, Any]
-
-
-def find_widget_for_result(
-    result_message: LlmClientFunctionCallResultMessage,
-    widget_lookup: Mapping[str, Widget],
-) -> Widget | None:
-    """Locate the widget that produced a deferred result message.
-
-    Attempts to find the widget first by direct tool name match, then by
-    checking if the result is from a get_widget_data call with a widget_uuid.
-
-    Parameters
-    ----------
-    result_message : LlmClientFunctionCallResultMessage
-        The result message to find a widget for
-    widget_lookup : Mapping[str, Widget]
-        Mapping from tool names to widgets
-
-    Returns
-    -------
-    Widget | None
-        The widget that produced the result, or None if not found
-    """
-    widget = widget_lookup.get(result_message.function)
-    if widget is not None:
-        return widget
-
-    if result_message.function == GET_WIDGET_DATA_TOOL_NAME:
-        data_sources = result_message.input_arguments.get("data_sources", [])
-        if data_sources:
-            data_source = data_sources[0]
-            widget_uuid = data_source.get("widget_uuid")
-            for candidate in widget_lookup.values():
-                if str(candidate.uuid) == widget_uuid:
-                    return candidate
-
-    return None
 
 
 def extract_widget_args(
@@ -143,7 +95,7 @@ def serialized_content_from_result(
     SerializedContent
         Typed dictionary with input_arguments, data, and optional extra_state
     """
-    return ContentSerializer.serialize_result(result_message)
+    return serialize_result(result_message)
 
 
 def handle_generic_tool_result(
@@ -182,9 +134,13 @@ def handle_generic_tool_result(
     if artifact is not None:
         if isinstance(artifact, MessageArtifactSSE):
             return [
-                EventBuilder.reasoning_with_artifacts(
-                    f"Tool '{info.tool_name}' returned",
-                    [artifact.data],
+                StatusUpdateSSE(
+                    data=StatusUpdateSSEData(
+                        eventType="INFO",
+                        message=f"Tool '{info.tool_name}' returned",
+                        group="reasoning",
+                        artifacts=[artifact.data],
+                    )
                 )
             ]
         return [
@@ -198,7 +154,7 @@ def handle_generic_tool_result(
         if formatted:
             details = formatted.copy()
 
-    result_text = ContentSerializer.to_string(content)
+    result_text = to_string(content)
     if result_text:
         details = details or {}
         details["Result"] = format_arg_value(content)
@@ -283,7 +239,14 @@ def tool_result_events_from_content(
 
     if artifacts:
         events.append(
-            EventBuilder.reasoning_with_artifacts("Data retrieved", artifacts)
+            StatusUpdateSSE(
+                data=StatusUpdateSSEData(
+                    eventType="INFO",
+                    message="Data retrieved",
+                    group="reasoning",
+                    artifacts=artifacts,
+                )
+            )
         )
 
     return events
@@ -430,6 +393,40 @@ def _process_error_result(entry: dict[str, Any]) -> SSE | None:
     return None
 
 
+def _looks_like_error_text(text: str) -> bool:
+    """Heuristic to decide if a string represents an error message."""
+
+    lowered = text.strip().lower()
+    return (
+        lowered.startswith("error")
+        or lowered.startswith("exception")
+        or "traceback" in lowered
+    )
+
+
+def _extract_error_messages(value: Any) -> list[str] | None:
+    """Extract error-looking strings from common payload shapes."""
+
+    if isinstance(value, dict):
+        candidate = value.get("error") or value.get("message")
+        if isinstance(candidate, str) and _looks_like_error_text(candidate):
+            return [candidate]
+
+    if isinstance(value, str) and _looks_like_error_text(value):
+        return [value]
+
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(item, str) for item in value)
+    ):
+        errors = [item for item in value if _looks_like_error_text(item)]
+        if errors:
+            return errors
+
+    return None
+
+
 def _dict_items_to_rows(data: Mapping[str, Any]) -> list[dict[str, str]]:
     """Convert a mapping into key/value rows for table rendering."""
 
@@ -502,6 +499,104 @@ def _try_expand_mapping(
     return artifacts
 
 
+def _resolve_widget_name(
+    item: dict[str, Any],
+    widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None,
+    default_widget: Widget | None,
+    idx: int,
+) -> str | None:
+    """Resolve the name for a data item."""
+    name = item.get("name")
+
+    if name:
+        return name
+
+    resolved_widget = None
+    if default_widget:
+        resolved_widget = default_widget
+    elif widget_entries and idx < len(widget_entries):
+        resolved_widget = widget_entries[idx][0]
+
+    if resolved_widget:
+        return resolved_widget.name
+
+    return None
+
+
+def _parse_item_content(
+    raw_content: str,
+    display_name: str,
+) -> tuple[Any, StatusUpdateSSE | None]:
+    """Parse raw content string into structured data or return an error event."""
+    try:
+        parsed = _decode_nested_json(json.loads(raw_content))
+        return parsed, None
+    except (json.JSONDecodeError, ValueError):
+        error_messages = _extract_error_messages(raw_content)
+        if error_messages:
+            return None, StatusUpdateSSE(
+                data=StatusUpdateSSEData(
+                    eventType=EVENT_TYPE_ERROR,
+                    message=error_messages[0],
+                    details=[{"errors": error_messages}],
+                )
+            )
+
+        return None, StatusUpdateSSE(
+            data=StatusUpdateSSEData(
+                eventType="WARNING",
+                message=f"Failed to parse content for '{display_name}'",
+                details=[{"name": display_name}],
+            )
+        )
+
+
+def _item_to_artifact(
+    parsed: Any,
+    name: str | None,
+    description: str | None,
+) -> tuple[list[ClientArtifact], SSE | None]:
+    """Convert parsed data into artifacts or error event."""
+    error_messages = _extract_error_messages(parsed)
+    if error_messages:
+        return [], StatusUpdateSSE(
+            data=StatusUpdateSSEData(
+                eventType=EVENT_TYPE_ERROR,
+                message=error_messages[0],
+                details=[{"errors": error_messages}],
+            )
+        )
+
+    table_rows = _extract_table_rows(parsed)
+    if table_rows is not None:
+        return [
+            ClientArtifact(
+                type="table",
+                name=name or f"Table_{uuid4().hex[:4]}",
+                description=description or "Widget data",
+                content=table_rows,
+            )
+        ], None
+
+    if isinstance(parsed, dict):
+        expanded = _try_expand_mapping(parsed, name, description)
+        if expanded:
+            return expanded, None
+
+        rows = _dict_items_to_rows(parsed)
+        if rows:
+            return [
+                ClientArtifact(
+                    type="table",
+                    name=name or f"Details_{uuid4().hex[:4]}",
+                    description=description or "Widget data",
+                    content=rows,
+                )
+            ], None
+
+    return [], None
+
+
 def _process_data_items(
     entry: dict[str, Any],
     mark_streamed_text: TextStreamCallback,
@@ -545,18 +640,7 @@ def _process_data_items(
         if not isinstance(raw_content, str):
             continue
 
-        # Resolve name if missing
-        name = item.get("name")
-
-        resolved_widget = None
-        if default_widget:
-            resolved_widget = default_widget
-        elif widget_entries and idx < len(widget_entries):
-            resolved_widget = widget_entries[idx][0]
-
-        if not name and resolved_widget:
-            name = resolved_widget.name
-
+        name = _resolve_widget_name(item, widget_entries, default_widget, idx)
         display_name = name or "unknown"
 
         data_format = item.get("data_format", {})
@@ -576,54 +660,30 @@ def _process_data_items(
             )
             continue
 
-        try:
-            parsed = _decode_nested_json(json.loads(raw_content))
-        except (json.JSONDecodeError, ValueError):
-            events.append(
-                StatusUpdateSSE(
-                    data=StatusUpdateSSEData(
-                        eventType="WARNING",
-                        message=(f"Failed to parse content for '{display_name}'"),
-                        details=[{"name": display_name}],
-                    )
-                )
-            )
-            mark_streamed_text()
-            events.append(message_chunk(raw_content))
+        parsed, error_event = _parse_item_content(raw_content, display_name)
+        if error_event:
+            events.append(error_event)
+            # If it was just a warning (parse failure), we stream the raw content
+            if (
+                isinstance(error_event, StatusUpdateSSE)
+                and error_event.data.eventType == "WARNING"
+            ):
+                mark_streamed_text()
+                events.append(message_chunk(raw_content))
             continue
 
-        table_rows = _extract_table_rows(parsed)
-        if table_rows is not None:
-            artifacts.append(
-                ClientArtifact(
-                    type="table",
-                    name=name or item.get("name") or f"Table_{uuid4().hex[:4]}",
-                    description=item.get("description") or "Widget data",
-                    content=table_rows,
-                )
-            )
-        elif isinstance(parsed, dict):
-            expanded = _try_expand_mapping(
-                parsed, name or item.get("name"), item.get("description")
-            )
-            if expanded:
-                artifacts.extend(expanded)
-            else:
-                rows = _dict_items_to_rows(parsed)
-                if rows:
-                    artifacts.append(
-                        ClientArtifact(
-                            type="table",
-                            name=(
-                                name or item.get("name") or f"Details_{uuid4().hex[:4]}"
-                            ),
-                            description=item.get("description") or "Widget data",
-                            content=rows,
-                        )
-                    )
-                else:
-                    mark_streamed_text()
-                    events.append(message_chunk(json.dumps(parsed)))
+        new_artifacts, error_event = _item_to_artifact(
+            parsed,
+            name,
+            item.get("description"),
+        )
+
+        if error_event:
+            events.append(error_event)
+            continue
+
+        if new_artifacts:
+            artifacts.extend(new_artifacts)
         else:
             mark_streamed_text()
             events.append(message_chunk(raw_content))
@@ -638,14 +698,14 @@ def _extract_table_rows(value: Any) -> list[dict[str, Any]] | None:
         if all(isinstance(row, dict) for row in value):
             return [dict(row) for row in value]
 
-        # Handel double-encode results: ["[{...}]"]
+        # Handle double-encoded results: ["[{...}]"]
         nested: list[Any] = []
         all_strings = True
         for entry in value:
             if not isinstance(entry, str):
                 all_strings = False
                 break
-            decoded = _decode_nested_json(ContentSerializer.parse_json(entry))
+            decoded = _decode_nested_json(parse_json(entry))
             nested.append(decoded)
 
         if all_strings:
@@ -657,7 +717,7 @@ def _extract_table_rows(value: Any) -> list[dict[str, Any]] | None:
                 return [dict(row) for row in nested]
 
     if isinstance(value, str):
-        parsed = _decode_nested_json(ContentSerializer.parse_json(value))
+        parsed = _decode_nested_json(parse_json(value))
         if parsed == value:
             return None
         return _extract_table_rows(parsed)
@@ -670,7 +730,7 @@ def _decode_nested_json(value: Any, *, max_depth: int = 3) -> Any:
 
     depth = 0
     while isinstance(value, str) and depth < max_depth:
-        parsed = ContentSerializer.parse_json(value)
+        parsed = parse_json(value)
         if parsed == value:
             break
         value = parsed

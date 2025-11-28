@@ -8,8 +8,10 @@ from typing import Any, Mapping
 GET_WIDGET_DATA_TOOL_NAME = "get_widget_data"
 EXECUTE_MCP_TOOL_NAME = "execute_agent_tool"
 CHART_TOOL_NAME = "openbb_create_chart"
+TABLE_TOOL_NAME = "openbb_create_table"
 CHART_PLACEHOLDER_TOKEN = "{{place_chart_here}}"  # noqa: S105
 CHART_PLACEHOLDER_TOKENS = (CHART_PLACEHOLDER_TOKEN,)
+
 
 # Event type constants
 EVENT_TYPE_THINKING = "Thinking"
