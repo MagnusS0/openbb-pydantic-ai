@@ -38,11 +38,12 @@ uv add openbb-pydantic-ai
 ```python
 from fastapi import FastAPI, Request
 from pydantic_ai import Agent
-from openbb_pydantic_ai import OpenBBAIAdapter
+from openbb_pydantic_ai import OpenBBAIAdapter, OpenBBDeps
 
 agent = Agent(
-    "openai:gpt-4o",
+    "openai:gpt-5",
     instructions="Be concise and helpful. Only use widget tools for data lookups.",
+    deps_type=OpenBBDeps,
 )
 app = FastAPI()
 
@@ -90,14 +91,32 @@ async for event in adapter.run_stream():
 You can also supply `message_history`, `deferred_tool_results`, or `on_complete`
 callbacks—any option supported by `Agent.run_stream_events()` is accepted.
 
+**Runtime deps & prompts**
+
+- `OpenBBDeps` bundles widgets (grouped by priority), context rows, relevant
+  URLs, workspace state, timezone, and a serialized `state` dict you can pass to
+  toolsets or output validators.
+- The adapter merges dashboard context and current widget parameter values into
+  the runtime instructions automatically; append your own instructions without
+  re-supplying that context.
+
 ## Features
 
 ### Widget Toolsets
 
 - Widgets are grouped by priority (`primary`, `secondary`, `extra`) and exposed
   through dedicated toolsets so you can gate access if needed.
-- Tool names follow `openbb_widget_{origin}_{widget_id}`; the helper
-  `build_widget_tool_name` reproduces the exact string for routing.
+- Tool names start with `openbb_widget_` plus the widget identifier; any
+  redundant `openbb_` prefix from the origin is trimmed so names stay concise
+  (e.g., `openbb_widget_sandbox_financial_statements`). Use
+  `build_widget_tool_name` to reproduce the routing string exactly.
+
+### MCP Tools
+
+- Any tools listed in `QueryRequest.tools` are exposed as a external
+  MCP toolset, so the model can call the same names the Workspace UI presents.
+- Deferred `execute_agent_tool` results replay on the next request just like
+  widget results, keeping multi-turn streaming consistent.
 
 ### Deferred Results & Citations
 
@@ -108,14 +127,13 @@ callbacks—any option supported by `Agent.run_stream_events()` is accepted.
 
 ### Structured Output Detection
 
-The adapter provides built-in tools and automatic detection for tables and charts:
+The adapter provides built-in helpers and automatic detection for charts and tables:
 
-- **`openbb_create_table`** - Explicitly create table artifacts from structured data
-- **`openbb_create_chart`** - Create chart artifacts (line, bar, scatter, pie, donut) with validation
-- **Auto-detection** - Dict/list outputs shaped like `{"type": "table", "data": [...]}` (or just a list of dicts) automatically become tables
-- **Flexible chart parameters** - Chart outputs tolerate different field spellings (`y_keys`, `yKeys`, etc.) and validate required axes before emitting
-
-These tools are always available through the `VisualizationToolset`, allowing agents to explicitly create well-formatted visualizations.
+- **Markdown tables** - Stream tabular data as Markdown; Workspace renders them as tables and lets users promote them to widgets.
+- **`openbb_create_chart`** - Create chart artifacts (line, bar, scatter, pie, donut) with validation. Insert `{{place_chart_here}}` in the response where the chart should appear; the adapter swaps that placeholder for the rendered artifact while streaming.
+- **Auto-detection** - Dict/list outputs shaped like `{"type": "table", "data": [...]}` (or just a list of dicts) automatically become tables.
+- **Flexible chart parameters** - Chart outputs tolerate different field spellings (`y_keys`, `yKeys`, etc.) and validate required axes before emitting.
+- **`openbb_create_table`** - Explicitly create a table artifact from structured data when you want predictable column ordering and metadata.
 
 ## Local Development
 
@@ -124,5 +142,5 @@ This repo ships a UV-based workflow:
 ```bash
 uv sync --dev         # install dependencies
 uv run pytest      # run the focused test suite
-uv run ty check    # static type checking (ty)
+uv run ty check    # type checking (ty)
 ```
