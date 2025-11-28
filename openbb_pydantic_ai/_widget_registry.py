@@ -12,9 +12,10 @@ from openbb_ai.models import (
 )
 
 from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
+from openbb_pydantic_ai._utils import iter_widget_collection
 
 if TYPE_CHECKING:
-    from pydantic_ai.toolsets import FunctionToolset
+    from pydantic_ai.toolsets import AbstractToolset
 
     from openbb_pydantic_ai._dependencies import OpenBBDeps
 
@@ -25,7 +26,7 @@ class WidgetRegistry:
     def __init__(
         self,
         collection: WidgetCollection | None = None,
-        toolsets: Sequence[FunctionToolset[OpenBBDeps]] | None = None,
+        toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
     ):
         """Initialize widget registry from collection and toolsets.
 
@@ -38,15 +39,12 @@ class WidgetRegistry:
         """
         self._by_tool_name: dict[str, Widget] = {}
         self._by_uuid: dict[str, Widget] = {}
-        self._by_origin_id: dict[tuple[str, str], Widget] = {}
 
         def _register(widget: Widget, *, tool_name: str | None = None) -> None:
             if tool_name is not None:
                 self._by_tool_name[tool_name] = widget
             uuid_key = str(widget.uuid)
             self._by_uuid.setdefault(uuid_key, widget)
-            origin_key = (widget.origin, widget.widget_id)
-            self._by_origin_id.setdefault(origin_key, widget)
 
         # Build lookup from toolsets
         if toolsets:
@@ -58,14 +56,8 @@ class WidgetRegistry:
 
         # Also index from collection if provided
         if collection:
-            for widget in self._iter_collection(collection):
+            for widget in iter_widget_collection(collection):
                 _register(widget)
-
-    @staticmethod
-    def _iter_collection(collection: WidgetCollection) -> Iterator[Widget]:
-        """Iterate all widgets in a collection."""
-        for group in (collection.primary, collection.secondary, collection.extra):
-            yield from group
 
     def find_by_tool_name(self, name: str) -> Widget | None:
         """Find a widget by its tool name.
@@ -96,11 +88,6 @@ class WidgetRegistry:
             The widget if found, None otherwise
         """
         return self._by_uuid.get(uuid)
-
-    def find_by_origin_and_id(self, origin: str, widget_id: str) -> Widget | None:
-        """Find a widget by its workspace origin/id pair."""
-
-        return self._by_origin_id.get((origin, widget_id))
 
     def find_for_result(
         self, result: LlmClientFunctionCallResultMessage
@@ -140,12 +127,7 @@ class WidgetRegistry:
         Iterator[Widget]
             Iterator over all widgets
         """
-        # Use dict to deduplicate by UUID
-        seen = set()
-        for widget in self._by_uuid.values():
-            if str(widget.uuid) not in seen:
-                seen.add(str(widget.uuid))
-                yield widget
+        yield from self._by_uuid.values()
 
     def as_mapping(self) -> Mapping[str, Widget]:
         """Get widget lookup as a read-only mapping by tool name.

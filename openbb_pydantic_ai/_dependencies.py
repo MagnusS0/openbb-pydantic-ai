@@ -13,6 +13,8 @@ from openbb_ai.models import (
     WorkspaceState,
 )
 
+from openbb_pydantic_ai._utils import iter_widget_collection
+
 
 @dataclass(slots=True)
 class OpenBBDeps:
@@ -42,9 +44,7 @@ class OpenBBDeps:
         """Yield all widgets across priority groups (primary, secondary, extra)."""
         if not self.widgets:
             return
-
-        for group in (self.widgets.primary, self.widgets.secondary, self.widgets.extra):
-            yield from group
+        yield from iter_widget_collection(self.widgets)
 
     def get_widget_by_uuid(self, widget_uuid: str) -> Widget | None:
         """Find a widget by its UUID string."""
