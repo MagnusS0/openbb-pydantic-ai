@@ -1,3 +1,8 @@
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/username/repository)
+
+
 # OpenBB Pydantic AI Adapter
 
 `openbb-pydantic-ai` lets any [Pydantic AI](https://ai.pydantic.dev/) agent
