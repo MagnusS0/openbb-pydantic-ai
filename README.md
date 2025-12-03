@@ -51,10 +51,50 @@ agent = Agent(
     deps_type=OpenBBDeps,
 )
 app = FastAPI()
-
+AGENT_BASE_URL = "http://localhost:8003"
+# OpenBB Workspace discovers agents via this endpoint
+@app.get("/agents.json")
+async def agents_json():
+    return JSONResponse(
+        content={
+            "<agent-id>": {
+                "name": "My Custom Agent",
+                "description": "This is my custom agent",
+                "image": f"{AGENT_BASE_URL}/my-custom-agent/logo.png",
+                "endpoints": {
+                    "query": f"{AGENT_BASE_URL}/query",
+                },
+                "features": {
+                    "streaming": True,
+                    "widget-dashboard-select": True,  # Access priority widgets
+                    "widget-dashboard-search": True,  # Access non-priority widgets
+                    "mcp-tools": True,               # Use MCP tools
+                },
+            }
+        }
+    )
+# Main query endpoint that handles SSE streaming
 @app.post("/query")
 async def query(request: Request):
-    return await OpenBBAIAdapter.dispatch_request(request, agent=agent)
+    """
+    OpenBB Workspace sends POST requests with QueryRequest payload.
+    The adapter handles SSE streaming automatically.
+    """
+    try:
+        return await OpenBBAIAdapter.dispatch_request(
+            request, agent=agent
+        )
+    except BrokenResourceError:
+        # Client disconnected we expect this
+        pass
+# CORS configuration for OpenBB Workspace domain
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://pro.openbb.co"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 ```
 
 ### How It Works
