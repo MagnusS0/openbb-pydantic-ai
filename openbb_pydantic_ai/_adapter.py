@@ -17,7 +17,7 @@ from openbb_ai.models import (
     Undefined,
     Widget,
 )
-from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.agent import AbstractAgent, AgentMetadata
 from pydantic_ai.agent.abstract import Instructions
 from pydantic_ai.builtin_tools import AbstractBuiltinTool
 from pydantic_ai.messages import (
@@ -350,6 +350,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
         usage: RunUsage | None = None,
+        metadata: AgentMetadata[OpenBBDeps] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
         builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
@@ -370,6 +371,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             model_settings=model_settings,
             usage_limits=usage_limits,
             usage=usage,
+            metadata=metadata,
             infer_name=infer_name,
             toolsets=toolsets,
             builtin_tools=builtin_tools,
@@ -389,6 +391,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
         usage: RunUsage | None = None,
+        metadata: AgentMetadata[OpenBBDeps] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
         builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
@@ -421,6 +424,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             model_settings=model_settings,
             usage_limits=usage_limits,
             usage=usage,
+            metadata=metadata,
             infer_name=infer_name,
             toolsets=toolsets,
             builtin_tools=builtin_tools,
@@ -439,6 +443,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
         usage: RunUsage | None = None,
+        metadata: AgentMetadata[OpenBBDeps] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
         builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
@@ -469,6 +474,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             model_settings=model_settings,
             usage_limits=usage_limits,
             usage=usage,
+            metadata=metadata,
             infer_name=infer_name,
             toolsets=toolsets,
             builtin_tools=builtin_tools,
