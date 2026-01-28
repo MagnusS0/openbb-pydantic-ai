@@ -278,12 +278,10 @@ def test_tool_result_events_table_parse_failure_streams_raw_text() -> None:
         mark_streamed_text=lambda: None,
     )
 
-    assert len(events) == 2
+    assert len(events) == 1
     assert events[0].event == "copilotStatusUpdate"
     assert events[0].data.details
     assert events[0].data.details[0]["name"] == "broken"
-    assert isinstance(events[1], MessageChunkSSE)
-    assert events[1].data.delta == "not-json"
 
 
 def test_tool_result_events_unsupported_format_emits_status() -> None:

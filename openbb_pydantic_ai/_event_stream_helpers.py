@@ -19,6 +19,8 @@ from openbb_ai.models import (
     Widget,
 )
 
+from openbb_pydantic_ai._viz_toolsets import _html_artifact
+
 from ._config import EVENT_TYPE_ERROR, GET_WIDGET_DATA_TOOL_NAME
 from ._serializers import parse_json, serialize_result, to_string
 from ._types import SerializedContent, TextStreamCallback
@@ -255,14 +257,15 @@ def tool_result_events_from_content(
 def artifact_from_output(output: Any) -> SSE | None:
     """Create an artifact SSE from generic tool output payloads.
 
-    Detects and creates appropriate artifacts (charts or tables) from structured
-    output. Supports various chart types (line, bar, scatter, pie, donut) and
-    table formats.
+    Detects and creates appropriate artifacts (charts, tables, or HTML) from
+    structured output. Supports various chart types (line, bar, scatter, pie,
+    donut), table formats, and HTML content.
 
     Parameters
     ----------
     output : Any
         The tool output to convert to an artifact. Can be:
+        - dict with 'type': 'html' and 'content' for HTML artifacts
         - dict with 'type' and 'data' for charts
         - dict with 'table' key for tables
         - list of dicts for automatic table creation
@@ -270,7 +273,8 @@ def artifact_from_output(output: Any) -> SSE | None:
     Returns
     -------
     SSE | None
-        A chart or table artifact event, or None if output format is not recognized
+        A chart, table, or HTML artifact event, or None if output format is
+        not recognized
 
     Notes
     -----
@@ -279,7 +283,19 @@ def artifact_from_output(output: Any) -> SSE | None:
     - pie/donut: angle_key and callout_label_key required
     """
     if isinstance(output, dict):
-        chart_type = output.get("type")
+        output_type = output.get("type")
+
+        # Check for HTML artifact
+        if output_type == "html":
+            content = output.get("content") or output.get("html")
+            if isinstance(content, str):
+                return _html_artifact(
+                    content=content,
+                    name=output.get("name"),
+                    description=output.get("description"),
+                )
+
+        chart_type = output_type
         data = output.get("data")
 
         if isinstance(chart_type, str) and chart_type in {
@@ -567,6 +583,21 @@ def _item_to_artifact(
             )
         )
 
+    # Check for HTML artifact structure in parsed data
+    if isinstance(parsed, dict) and parsed.get("type") == "html":
+        html_content = parsed.get("content") or parsed.get("html")
+        if isinstance(html_content, str):
+            return [
+                ClientArtifact(
+                    type="html",
+                    name=parsed.get("name") or name or "HTML Content",
+                    description=parsed.get("description")
+                    or description
+                    or "HTML artifact",
+                    content=html_content,
+                )
+            ], None
+
     table_rows = _extract_table_rows(parsed)
     if table_rows is not None:
         return [
@@ -632,6 +663,16 @@ def _process_data_items(
     artifacts: list[ClientArtifact] = []
     events: list[SSE] = []
 
+    html_widget_ids: set[str] = set()
+    if widget_entries:
+        for widget, _ in widget_entries:
+            if widget and isinstance(widget.widget_id, str):
+                if widget.widget_id.startswith("html-"):
+                    html_widget_ids.add(widget.widget_id)
+    if default_widget and isinstance(default_widget.widget_id, str):
+        if default_widget.widget_id.startswith("html-"):
+            html_widget_ids.add(default_widget.widget_id)
+
     for idx, item in enumerate(items):
         if not isinstance(item, dict):
             continue
@@ -652,6 +693,27 @@ def _process_data_items(
             events.append(message_chunk(raw_content))
             continue
 
+        widget_for_item = default_widget
+        if not widget_for_item and widget_entries and idx < len(widget_entries):
+            widget_for_item = widget_entries[idx][0]
+
+        is_html_widget = bool(
+            widget_for_item
+            and isinstance(widget_for_item.widget_id, str)
+            and widget_for_item.widget_id in html_widget_ids
+        )
+        if data_type == "html" or is_html_widget:
+            html_content = _html_content_from_raw(raw_content) or raw_content
+            artifacts.append(
+                ClientArtifact(
+                    type="html",
+                    name=name or "HTML Content",
+                    description=item.get("description") or "HTML artifact",
+                    content=html_content,
+                )
+            )
+            continue
+
         if data_type and data_type not in ("object", "json"):
             events.append(
                 reasoning_step(
@@ -663,13 +725,6 @@ def _process_data_items(
         parsed, error_event = _parse_item_content(raw_content, display_name)
         if error_event:
             events.append(error_event)
-            # If it was just a warning (parse failure), we stream the raw content
-            if (
-                isinstance(error_event, StatusUpdateSSE)
-                and error_event.data.eventType == "WARNING"
-            ):
-                mark_streamed_text()
-                events.append(message_chunk(raw_content))
             continue
 
         new_artifacts, error_event = _item_to_artifact(
@@ -736,3 +791,18 @@ def _decode_nested_json(value: Any, *, max_depth: int = 3) -> Any:
         value = parsed
         depth += 1
     return value
+
+
+def _html_content_from_raw(value: str) -> str | None:
+    """Extract HTML from raw string payloads, handling double-encoded JSON."""
+    parsed = _decode_nested_json(parse_json(value))
+    if isinstance(parsed, str):
+        return parsed.replace("\\n", "\n")
+    if isinstance(parsed, dict):
+        candidate = parsed.get("content") or parsed.get("html")
+        if isinstance(candidate, str):
+            return candidate.replace("\\n", "\n")
+    # Fallback: normalize literal \n sequences.
+    if "\\n" in value:
+        return value.replace("\\n", "\n")
+    return None

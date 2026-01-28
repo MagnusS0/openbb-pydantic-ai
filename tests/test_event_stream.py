@@ -33,9 +33,11 @@ from openbb_pydantic_ai._config import (
     CHART_PLACEHOLDER_TOKEN,
     CHART_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
+    HTML_TOOL_NAME,
 )
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
 from openbb_pydantic_ai._utils import format_args
+from openbb_pydantic_ai._viz_toolsets import _html_artifact
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 from openbb_pydantic_ai._widget_toolsets import build_widget_tool_name
 
@@ -555,3 +557,81 @@ def test_chart_tool_result_without_placeholder_streams_artifact(make_request) ->
     after_events = _collect_events(stream.after_stream())
     assert len(after_events) == 1
     assert isinstance(after_events[0], MessageArtifactSSE)
+
+
+def test_html_tool_result_queues_artifact(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="HTML")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    html_artifact = _html_artifact(
+        content="<div>Hello World</div>",
+        name="Test HTML",
+        description="Test description",
+    )
+
+    tool_event = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name=HTML_TOOL_NAME,
+            tool_call_id="html-1",
+            content=None,
+            metadata={"html": html_artifact},
+        )
+    )
+
+    async def _emit_html() -> list[SSE]:
+        return [event async for event in stream.handle_function_tool_result(tool_event)]
+
+    html_events = asyncio.run(_emit_html())
+    # No placeholder, so nothing emitted immediately (queued for after_stream)
+    assert html_events == []
+
+    # Artifact emitted in after_stream (same as charts)
+    after_events = _collect_events(stream.after_stream())
+    assert len(after_events) == 1
+    assert isinstance(after_events[0], MessageArtifactSSE)
+    assert after_events[0].data.type == "html"
+    assert after_events[0].data.content == "<div>Hello World</div>"
+
+
+def test_artifact_detection_for_html_output(make_request) -> None:
+    request = make_request(
+        [LlmClientMessage(role=RoleEnum.human, content="Generate HTML")]
+    )
+    stream = OpenBBAIEventStream(run_input=request)
+
+    artifact = stream._artifact_from_output(
+        {
+            "type": "html",
+            "content": "<section>Section content</section>",
+            "name": "Section",
+            "description": "A section artifact",
+        }
+    )
+
+    assert artifact is not None
+    assert artifact.event == "copilotMessageArtifact"
+    assert isinstance(artifact, MessageArtifactSSE)
+    assert artifact.data.type == "html"
+    assert artifact.data.content == "<section>Section content</section>"
+    assert artifact.data.name == "Section"
+    assert artifact.data.description == "A section artifact"
+
+
+def test_artifact_detection_for_html_with_html_key(make_request) -> None:
+    request = make_request(
+        [LlmClientMessage(role=RoleEnum.human, content="Generate HTML")]
+    )
+    stream = OpenBBAIEventStream(run_input=request)
+
+    # Test using "html" key instead of "content"
+    artifact = stream._artifact_from_output(
+        {
+            "type": "html",
+            "html": "<p>Paragraph</p>",
+        }
+    )
+
+    assert artifact is not None
+    assert isinstance(artifact, MessageArtifactSSE)
+    assert artifact.data.type == "html"
+    assert artifact.data.content == "<p>Paragraph</p>"
