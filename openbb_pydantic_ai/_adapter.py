@@ -323,7 +323,9 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             return None
         if len(self._toolsets) == 1:
             return self._toolsets[0]
-        combined = CombinedToolset(self._toolsets)
+        combined = CombinedToolset(
+            cast(Sequence[AbstractToolset[None]], self._toolsets)
+        )
         return cast(AbstractToolset[OpenBBDeps], combined)
 
     @cached_property

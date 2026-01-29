@@ -8,7 +8,7 @@ from typing import Any, Protocol, TypedDict
 if sys.version_info >= (3, 11):
     from typing import NotRequired
 else:
-    from typing_extensions import NotRequired  # type: ignore[assignment]
+    from typing_extensions import NotRequired
 
 
 class SerializedContent(TypedDict):

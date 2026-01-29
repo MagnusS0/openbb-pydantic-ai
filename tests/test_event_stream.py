@@ -92,7 +92,7 @@ def test_event_stream_emits_widget_requests_and_citations(
     assert events[0].event == "copilotStatusUpdate"
     assert "Sample Widget" in events[0].data.message
     assert events[1].event == "copilotFunctionCall"
-    assert stream._state.has_tool_call("call-1")  # type: ignore[attr-defined]
+    assert stream._state.has_tool_call("call-1")
 
     tool_result_event = FunctionToolResultEvent(
         result=ToolReturnPart(
@@ -194,7 +194,8 @@ def test_artifact_detection_for_table(make_request) -> None:
     artifact = stream._artifact_from_output([{"col": 1}, {"col": 2}])
     assert artifact is not None
     assert artifact.event == "copilotMessageArtifact"
-    assert artifact.data.type == "table"
+    message_artifact = cast(MessageArtifactSSE, artifact)
+    assert message_artifact.data.type == "table"
 
 
 def test_artifact_detection_normalizes_chart_payload(make_request) -> None:
@@ -217,8 +218,9 @@ def test_artifact_detection_normalizes_chart_payload(make_request) -> None:
     params = message_artifact.data.chart_params
     assert params is not None
     assert params.chartType == "bar"
-    assert params.xKey == "label"
-    assert params.yKey == ["value"]
+    params_any = cast(Any, params)
+    assert params_any.xKey == "label"
+    assert params_any.yKey == ["value"]
 
 
 def test_non_widget_tool_calls_show_in_reasoning(make_request) -> None:
