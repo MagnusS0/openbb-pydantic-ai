@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from openbb_ai.helpers import chart, table
-from pydantic import BaseModel, model_validator
+from openbb_ai.models import ClientArtifact, MessageArtifactSSE
+from pydantic import BaseModel, Field, model_validator
 from pydantic_ai import FunctionToolset, ToolReturn
 from pydantic_ai.tools import RunContext
 
+from openbb_pydantic_ai._config import HTML_TOOL_NAME
 from openbb_pydantic_ai._dependencies import OpenBBDeps
 
 
@@ -91,8 +93,60 @@ def _create_table(
     )
 
 
+class HtmlParams(BaseModel):
+    """Parameters for creating an HTML artifact."""
+
+    content: str = Field(description="The HTML content to render")
+    name: str | None = Field(default=None, description="Name for the artifact")
+    description: str | None = Field(
+        default=None, description="Description of the artifact"
+    )
+
+
+def _html_artifact(
+    content: str,
+    name: str | None = None,
+    description: str | None = None,
+) -> MessageArtifactSSE:
+    """Create an HTML artifact SSE event."""
+    return MessageArtifactSSE(
+        data=ClientArtifact(
+            type="html",
+            name=name or "HTML Content",
+            description=description or "HTML artifact",
+            content=content,
+        )
+    )
+
+
+def _create_html(
+    ctx: RunContext[OpenBBDeps],
+    params: HtmlParams,
+) -> ToolReturn:
+    """
+    Create an HTML artifact to display rich content inline.
+
+    Always requires:
+    - params.content: The HTML content to render
+
+    Optionally:
+    - params.name: Name for the artifact
+    - params.description: Description of the artifact
+    """
+    return ToolReturn(
+        return_value="HTML artifact created successfully.",
+        metadata={
+            "html": _html_artifact(
+                content=params.content,
+                name=params.name,
+                description=params.description,
+            )
+        },
+    )
+
+
 def build_viz_toolsets() -> FunctionToolset[OpenBBDeps]:
-    """Create visualization toolsets including chart and table creation tools.
+    """Create visualization toolsets including chart, table, and HTML creation tools.
 
     Returns
     -------
@@ -102,5 +156,6 @@ def build_viz_toolsets() -> FunctionToolset[OpenBBDeps]:
     viz_toolset = FunctionToolset[OpenBBDeps]()
     viz_toolset.add_function(_create_chart, name="openbb_create_chart")
     viz_toolset.add_function(_create_table, name="openbb_create_table")
+    viz_toolset.add_function(_create_html, name=HTML_TOOL_NAME)
 
     return viz_toolset

@@ -48,6 +48,7 @@ from openbb_pydantic_ai._config import (
     EVENT_TYPE_WARNING,
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
+    HTML_TOOL_NAME,
     TABLE_TOOL_NAME,
 )
 from openbb_pydantic_ai._dependencies import OpenBBDeps
@@ -456,15 +457,18 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if not tool_call_id:
             return
 
+        # Visualization tools (chart, table, html) - all use the same pattern
         viz_tools = {
             CHART_TOOL_NAME: "chart",
             TABLE_TOOL_NAME: "table",
+            HTML_TOOL_NAME: "html",
         }
 
         if result_part.tool_name in viz_tools:
             key = viz_tools[result_part.tool_name]
             metadata = getattr(result_part, "metadata", {}) or {}
             viz_artifact = metadata.get(key)
+
             if isinstance(viz_artifact, MessageArtifactSSE):
                 self._queued_viz_artifacts.append(viz_artifact)
                 for sse_event in self._emit_placeholder_artifact():

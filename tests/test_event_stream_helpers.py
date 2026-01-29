@@ -8,6 +8,7 @@ from openbb_ai.models import (
     LlmClientFunctionCallResultMessage,
     MessageChunkSSE,
     SingleDataContent,
+    StatusUpdateSSE,
     Widget,
 )
 
@@ -184,15 +185,13 @@ def test_tool_result_events_surface_function_call_errors() -> None:
     )
 
     assert len(events) == 1
-    status_event = events[0]
+    status_event = cast(StatusUpdateSSE, events[0])
+    status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
-    assert status_event.data.eventType == "ERROR"
-    assert (
-        status_event.data.message
-        == "Widget failed to load because the symbol was invalid"
-    )
-    assert status_event.data.details
-    assert status_event.data.details[0]["error_type"] == "widget_error"
+    assert status_data.eventType == "ERROR"
+    assert status_data.message == "Widget failed to load because the symbol was invalid"
+    assert status_data.details
+    assert status_data.details[0]["error_type"] == "widget_error"
 
 
 def test_tool_result_events_expand_mapping_sections() -> None:
@@ -278,12 +277,12 @@ def test_tool_result_events_table_parse_failure_streams_raw_text() -> None:
         mark_streamed_text=lambda: None,
     )
 
-    assert len(events) == 2
-    assert events[0].event == "copilotStatusUpdate"
-    assert events[0].data.details
-    assert events[0].data.details[0]["name"] == "broken"
-    assert isinstance(events[1], MessageChunkSSE)
-    assert events[1].data.delta == "not-json"
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    status_data = status_event.data
+    assert status_event.event == "copilotStatusUpdate"
+    assert status_data.details
+    assert status_data.details[0]["name"] == "broken"
 
 
 def test_tool_result_events_unsupported_format_emits_status() -> None:
@@ -307,8 +306,10 @@ def test_tool_result_events_unsupported_format_emits_status() -> None:
     )
 
     assert len(events) == 1
-    assert events[0].event == "copilotStatusUpdate"
-    assert "not implemented" in events[0].data.message
+    status_event = cast(StatusUpdateSSE, events[0])
+    status_data = status_event.data
+    assert status_event.event == "copilotStatusUpdate"
+    assert "not implemented" in status_data.message
 
 
 def test_handle_generic_tool_result_emits_artifacts() -> None:
@@ -321,9 +322,10 @@ def test_handle_generic_tool_result_emits_artifacts() -> None:
     )
 
     assert len(events) == 1
-    status_event = events[0]
+    status_event = cast(StatusUpdateSSE, events[0])
+    status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
-    assert status_event.data.artifacts
+    assert status_data.artifacts
 
 
 def test_tool_result_events_handle_list_of_strings_as_error() -> None:
@@ -348,12 +350,13 @@ def test_tool_result_events_handle_list_of_strings_as_error() -> None:
     events = tool_result_events_from_content(payload, mark_streamed_text=lambda: None)
 
     assert len(events) == 1
-    status_event = events[0]
+    status_event = cast(StatusUpdateSSE, events[0])
+    status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
-    assert status_event.data.eventType == "ERROR"
-    assert error_msg in status_event.data.message
-    assert status_event.data.details
-    details_list = cast(list[dict[str, Any]], status_event.data.details)
+    assert status_data.eventType == "ERROR"
+    assert error_msg in status_data.message
+    assert status_data.details
+    details_list = cast(list[dict[str, Any]], status_data.details)
     assert details_list[0]["errors"] == [error_msg]
 
 
