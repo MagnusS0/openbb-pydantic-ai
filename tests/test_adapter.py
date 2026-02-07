@@ -20,6 +20,7 @@ from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart, UserPro
 
 from openbb_pydantic_ai import OpenBBAIAdapter
 from openbb_pydantic_ai._widget_toolsets import build_widget_tool_name
+from openbb_pydantic_ai.tool_discovery import ToolDiscoveryToolset
 
 
 def test_adapter_injects_instructions(sample_context, make_request, human_message):
@@ -36,6 +37,37 @@ def test_adapter_injects_instructions(sample_context, make_request, human_messag
     assert instructions, "Adapter should inject context instructions"
     assert "Test Context" in instructions
     assert "https://example.com" in instructions
+
+
+def test_adapter_uses_progressive_tool_discovery_by_default(
+    widget_collection, make_request
+) -> None:
+    request = make_request(
+        [LlmClientMessage(role=RoleEnum.human, content="Hello")],
+        widgets=widget_collection,
+    )
+    adapter = OpenBBAIAdapter(agent=MagicMock(), run_input=request)
+
+    assert isinstance(adapter.toolset, ToolDiscoveryToolset)
+    assert "progressive disclosure" in adapter.instructions
+
+
+def test_adapter_can_disable_progressive_tool_discovery(
+    widget_collection, make_request
+) -> None:
+    request = make_request(
+        [LlmClientMessage(role=RoleEnum.human, content="Hello")],
+        widgets=widget_collection,
+    )
+    adapter = OpenBBAIAdapter(
+        agent=MagicMock(),
+        run_input=request,
+        enable_progressive_tool_discovery=False,
+    )
+
+    assert adapter.toolset is not None
+    assert not isinstance(adapter.toolset, ToolDiscoveryToolset)
+    assert "progressive disclosure" not in adapter.instructions
 
 
 def test_adapter_preserves_tool_call_ids(widget_collection, make_request):
