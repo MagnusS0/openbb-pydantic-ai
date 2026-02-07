@@ -8,6 +8,7 @@ import pytest
 from openbb_ai.helpers import chart
 from openbb_ai.models import (
     SSE,
+    AgentTool,
     DataContent,
     LlmClientFunctionCallResultMessage,
     LlmClientMessage,
@@ -32,6 +33,7 @@ from pydantic_ai.run import AgentRunResult, AgentRunResultEvent
 from openbb_pydantic_ai._config import (
     CHART_PLACEHOLDER_TOKEN,
     CHART_TOOL_NAME,
+    EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
     HTML_TOOL_NAME,
 )
@@ -120,6 +122,90 @@ def test_event_stream_emits_widget_requests_and_citations(
     first_citation = citation_events[0].data.citations[0]
     assert first_citation.source_info.metadata.get("input_args") == {"symbol": "AAPL"}
     assert first_citation.details == [format_args({"symbol": "AAPL"})]
+
+
+def test_discovery_wrapped_widget_deferred_request_routes_to_widget_api(
+    widget_collection, make_request
+) -> None:
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    registry = WidgetRegistry()
+    registry._by_tool_name[tool_name] = widget
+    stream = OpenBBAIEventStream(run_input=request, widget_registry=registry)
+
+    deferred = DeferredToolRequests()
+    deferred.calls.append(
+        ToolCallPart(
+            tool_name="call_tool",
+            tool_call_id="call-meta-widget",
+            args={
+                "tool_name": tool_name,
+                "arguments": {"symbol": "AAPL"},
+            },
+        )
+    )
+
+    events = _collect_events(
+        stream.handle_run_result(
+            AgentRunResultEvent(result=AgentRunResult(output=deferred))
+        )
+    )
+
+    function_calls = [e for e in events if e.event == "copilotFunctionCall"]
+    assert len(function_calls) == 1
+    function_call = function_calls[0]
+    assert function_call.data.function == GET_WIDGET_DATA_TOOL_NAME
+    data_sources = function_call.data.input_arguments.get("data_sources", [])
+    assert data_sources
+    first_source = data_sources[0]
+    input_args = (
+        first_source["input_args"]
+        if isinstance(first_source, dict)
+        else getattr(first_source, "input_args", None)
+    )
+    assert input_args == {"symbol": "AAPL"}
+
+
+def test_discovery_wrapped_mcp_deferred_request_routes_to_execute_agent_tool(
+    make_request,
+) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    agent_tool = AgentTool(
+        server_id="1761162970409",
+        name="database-connector_query_database",
+        url="http://localhost:8001/mcp/",
+        description="Run a SQL query",
+    )
+    stream = OpenBBAIEventStream(
+        run_input=request,
+        mcp_tools={agent_tool.name: agent_tool},
+    )
+
+    deferred = DeferredToolRequests()
+    deferred.calls.append(
+        ToolCallPart(
+            tool_name="call_tool",
+            tool_call_id="call-meta-mcp",
+            args={
+                "tool_name": agent_tool.name,
+                "arguments": {"query": "select 1"},
+            },
+        )
+    )
+
+    events = _collect_events(
+        stream.handle_run_result(
+            AgentRunResultEvent(result=AgentRunResult(output=deferred))
+        )
+    )
+
+    function_calls = [e for e in events if e.event == "copilotFunctionCall"]
+    assert len(function_calls) == 1
+    function_call = function_calls[0]
+    assert function_call.data.function == EXECUTE_MCP_TOOL_NAME
+    assert function_call.data.input_arguments["tool_name"] == agent_tool.name
+    assert function_call.data.input_arguments["parameters"] == {"query": "select 1"}
 
 
 def test_widget_dict_results_render_tool_output(
@@ -268,6 +354,46 @@ def test_non_widget_tool_calls_show_in_reasoning(make_request) -> None:
     assert isinstance(artifact_step, StatusUpdateSSE)
     assert "internal_tool" in artifact_step.data.message
     assert artifact_step.data.artifacts
+
+
+def test_discovery_call_tool_uses_nested_tool_name(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    call_event = FunctionToolCallEvent(
+        part=ToolCallPart(
+            tool_name="call_tool",
+            tool_call_id="meta-42",
+            args={
+                "tool_name": "internal_tool",
+                "arguments": {
+                    "query": "AAPL",
+                    "data": [{"value": 1}, {"value": 2}, {"value": 3}],
+                },
+            },
+        )
+    )
+
+    call_events = _collect_events(stream.handle_function_tool_call(call_event))
+    assert call_events
+    assert call_events[0].event == "copilotStatusUpdate"
+    assert "internal_tool" in call_events[0].data.message
+    assert "call_tool" not in call_events[0].data.message
+
+    result_event = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name="call_tool",
+            tool_call_id="meta-42",
+            content=[{"name": "address", "description": "Address"}],
+        )
+    )
+
+    result_events = _collect_events(stream.handle_function_tool_result(result_event))
+    assert result_events
+    assert len(result_events) == 1
+    status = result_events[0]
+    assert isinstance(status, StatusUpdateSSE)
+    assert "internal_tool" in status.data.message
 
 
 @pytest.mark.parametrize(
@@ -514,6 +640,55 @@ def test_chart_tool_result_replaces_placeholder_inline(make_request) -> None:
         result=ToolReturnPart(
             tool_name=CHART_TOOL_NAME,
             tool_call_id="chart-1",
+            content=None,
+            metadata={"chart": _chart_artifact()},
+        )
+    )
+
+    async def _emit_chart() -> list[SSE]:
+        return [event async for event in stream.handle_function_tool_result(tool_event)]
+
+    chart_events = asyncio.run(_emit_chart())
+    assert len(chart_events) == 2
+    assert isinstance(chart_events[0], MessageArtifactSSE)
+    assert isinstance(chart_events[1], MessageChunkSSE)
+    assert chart_events[1].data.delta == " Outro"
+
+
+def test_discovery_wrapped_chart_tool_replaces_placeholder_inline(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Chart")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    async def _stream_text() -> list[SSE]:
+        text_part = TextPart(content=f"Intro {CHART_PLACEHOLDER_TOKEN} Outro")
+        return [event async for event in stream.handle_text_start(text_part)]
+
+    text_events = asyncio.run(_stream_text())
+    assert len(text_events) == 1
+    assert isinstance(text_events[0], MessageChunkSSE)
+    assert text_events[0].data.delta == "Intro "
+
+    call_event = FunctionToolCallEvent(
+        part=ToolCallPart(
+            tool_name="call_tool",
+            tool_call_id="chart-meta-1",
+            args={
+                "tool_name": CHART_TOOL_NAME,
+                "arguments": {
+                    "type": "line",
+                    "data": [{"period": "Q1", "value": 1}],
+                    "x_key": "period",
+                    "y_keys": ["value"],
+                },
+            },
+        )
+    )
+    _collect_events(stream.handle_function_tool_call(call_event))
+
+    tool_event = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name="call_tool",
+            tool_call_id="chart-meta-1",
             content=None,
             metadata={"chart": _chart_artifact()},
         )

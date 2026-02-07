@@ -5,6 +5,10 @@ from importlib.metadata import PackageNotFoundError, version
 from openbb_pydantic_ai._adapter import OpenBBAIAdapter
 from openbb_pydantic_ai._dependencies import OpenBBDeps
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
+from openbb_pydantic_ai.tool_discovery import (
+    ToolDiscoveryToolset,
+    progressive_toolset,
+)
 
 try:
     __version__ = version("openbb-pydantic-ai")
@@ -15,4 +19,6 @@ __all__ = [
     "OpenBBAIAdapter",
     "OpenBBAIEventStream",
     "OpenBBDeps",
+    "ToolDiscoveryToolset",
+    "progressive_toolset",
 ]
