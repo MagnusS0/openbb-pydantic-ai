@@ -384,29 +384,34 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         mcp_requests: list[tuple[str, AgentTool, dict[str, Any]]] = []
 
         for call in output.calls:
-            widget = self.widget_registry.find_by_tool_name(call.tool_name)
+            raw_args = normalize_args(call.args)
+            effective_tool_name, effective_args = self._extract_effective_tool_call(
+                call.tool_name, raw_args
+            )
+
+            widget = self.widget_registry.find_by_tool_name(effective_tool_name)
             if widget is None:
-                agent_tool = self._find_agent_tool(call.tool_name)
+                agent_tool = self._find_agent_tool(effective_tool_name)
                 if agent_tool is None:
                     continue
 
-                args = normalize_args(call.args)
                 self._state.register_tool_call(
                     tool_call_id=call.tool_call_id,
-                    tool_name=call.tool_name,
-                    args=args,
+                    tool_name=effective_tool_name,
+                    args=effective_args,
                     agent_tool=agent_tool,
                 )
 
-                mcp_requests.append((call.tool_call_id, agent_tool, args))
+                mcp_requests.append((call.tool_call_id, agent_tool, effective_args))
                 continue
 
-            args = normalize_args(call.args)
-            widget_requests.append(WidgetRequest(widget=widget, input_arguments=args))
+            widget_requests.append(
+                WidgetRequest(widget=widget, input_arguments=effective_args)
+            )
             self._state.register_tool_call(
                 tool_call_id=call.tool_call_id,
-                tool_name=call.tool_name,
-                args=args,
+                tool_name=effective_tool_name,
+                args=effective_args,
                 widget=widget,
             )
             tool_call_ids.append(
@@ -421,7 +426,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             details = {
                 "Origin": widget.origin,
                 "Widget Id": widget.widget_id,
-                **format_args(args),
+                **format_args(effective_args),
             }
             yield reasoning_step(
                 f"Requesting widget '{widget.name}'",
@@ -452,6 +457,24 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             agent_tool=agent_tool,
         )
 
+    @staticmethod
+    def _extract_effective_tool_call(
+        tool_name: str, args: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """Map meta `call_tool(...)` invocations to the nested target tool."""
+        if tool_name != "call_tool":
+            return tool_name, args
+
+        nested_name = args.get("tool_name")
+        if not isinstance(nested_name, str) or not nested_name:
+            return tool_name, args
+
+        nested_args = args.get("arguments", {})
+        if not isinstance(nested_args, dict):
+            nested_args = {}
+
+        return nested_name, normalize_args(nested_args)
+
     async def handle_function_tool_call(
         self, event: FunctionToolCallEvent
     ) -> AsyncIterator[SSE]:
@@ -460,24 +483,28 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         part = event.part
         tool_name = part.tool_name
 
-        is_widget_call = self.widget_registry.find_by_tool_name(tool_name)
-        if is_widget_call or tool_name == GET_WIDGET_DATA_TOOL_NAME:
+        raw_args = normalize_args(part.args)
+        effective_tool_name, effective_args = self._extract_effective_tool_call(
+            tool_name, raw_args
+        )
+
+        is_widget_call = self.widget_registry.find_by_tool_name(effective_tool_name)
+        if is_widget_call or effective_tool_name == GET_WIDGET_DATA_TOOL_NAME:
             return
 
         tool_call_id = part.tool_call_id
         if not tool_call_id or self._state.has_tool_call(tool_call_id):
             return
 
-        args = normalize_args(part.args)
         self._state.register_tool_call(
             tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            args=args,
+            tool_name=effective_tool_name,
+            args=effective_args,
         )
 
-        formatted_args = format_args(args)
+        formatted_args = format_args(effective_args)
         details = formatted_args if formatted_args else None
-        yield reasoning_step(f"Calling tool '{tool_name}'", details=details)
+        yield reasoning_step(f"Calling tool '{effective_tool_name}'", details=details)
 
     async def handle_function_tool_result(
         self, event: FunctionToolResultEvent
@@ -502,6 +529,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if not tool_call_id:
             return
 
+        call_info = self._state.get_tool_call(tool_call_id)
+        effective_tool_name = (
+            call_info.tool_name if call_info else result_part.tool_name
+        )
+
         # Visualization tools (chart, table, html) - all use the same pattern
         viz_tools = {
             CHART_TOOL_NAME: "chart",
@@ -509,8 +541,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             HTML_TOOL_NAME: "html",
         }
 
-        if result_part.tool_name in viz_tools:
-            key = viz_tools[result_part.tool_name]
+        if effective_tool_name in viz_tools:
+            key = viz_tools[effective_tool_name]
             metadata = getattr(result_part, "metadata", {}) or {}
             viz_artifact = metadata.get(key)
 
@@ -540,7 +572,6 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield content
             return
 
-        call_info = self._state.get_tool_call(tool_call_id)
         if call_info is None:
             return
 

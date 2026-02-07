@@ -145,6 +145,33 @@ callbacks—any option supported by `Agent.run_stream_events()` is accepted.
   the runtime instructions automatically; append your own instructions without
   re-supplying that context.
 
+### Progressive Tool Discovery (Default)
+
+`OpenBBAIAdapter` now wraps toolsets with a progressive discovery layer by
+default. Instead of exposing every tool schema upfront, the model gets 4
+meta-tools:
+
+- `list_tools`
+- `search_tools`
+- `get_tool_schema`
+- `call_tool`
+
+This keeps the initial prompt smaller and fetches full schemas only when needed.
+Deferred tools are still delegated to the original toolsets, so widget/MCP
+flows continue to emit `get_widget_data` and `execute_agent_tool` events as
+before.
+
+If you need the previous direct-tool behavior, disable it when creating the
+adapter:
+
+```python
+adapter = OpenBBAIAdapter(
+    agent=agent,
+    run_input=run_input,
+    enable_progressive_tool_discovery=False,
+)
+```
+
 ## Features
 
 ### Widget Toolsets

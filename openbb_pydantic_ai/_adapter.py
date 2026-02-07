@@ -16,6 +16,7 @@ from openbb_ai.models import (
     QueryRequest,
     Undefined,
     Widget,
+    WidgetCollection,
 )
 from pydantic_ai.agent import AbstractAgent, AgentMetadata
 from pydantic_ai.agent.abstract import Instructions
@@ -39,6 +40,7 @@ from openbb_pydantic_ai._pdf_preprocess import preprocess_pdf_in_messages
 from openbb_pydantic_ai._viz_toolsets import build_viz_toolsets
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 from openbb_pydantic_ai._widget_toolsets import build_widget_toolsets
+from openbb_pydantic_ai.tool_discovery import ToolDiscoveryToolset
 
 if TYPE_CHECKING:
     from pydantic_ai import DeferredToolResults
@@ -51,6 +53,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     """UI adapter that bridges OpenBB Workspace requests with Pydantic AI."""
 
     accept: str | None = None
+    enable_progressive_tool_discovery: bool = True
 
     # Initialized in __post_init__
     _transformer: MessageTransformer = field(init=False)
@@ -188,6 +191,60 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 tools.update(mapping)
         return tools
 
+    @cached_property
+    def _progressive_named_toolsets(
+        self,
+    ) -> tuple[tuple[str, AbstractToolset[OpenBBDeps]], ...]:
+        named: list[tuple[str, AbstractToolset[OpenBBDeps]]] = []
+
+        collection = self.run_input.widgets or WidgetCollection()
+        widget_groups = (
+            ("openbb_widgets_primary", collection.primary),
+            ("openbb_widgets_secondary", collection.secondary),
+            ("openbb_widgets_extra", collection.extra),
+        )
+        widget_toolsets_iter = iter(self._widget_toolsets)
+        for group_id, widgets in widget_groups:
+            if widgets:
+                toolset = next(widget_toolsets_iter, None)
+                if toolset is not None:
+                    named.append((group_id, toolset))
+
+        named.append(("openbb_viz_tools", self._viz_toolset))
+
+        mcp_toolsets = cast("Sequence[AbstractToolset[OpenBBDeps]]", self._mcp_toolsets)
+        if len(mcp_toolsets) == 1:
+            named.append(("openbb_mcp_tools", mcp_toolsets[0]))
+        else:
+            for index, toolset in enumerate(mcp_toolsets):
+                named.append((f"openbb_mcp_tools_{index}", toolset))
+
+        return tuple(named)
+
+    @cached_property
+    def _progressive_group_descriptions(self) -> dict[str, str]:
+        descriptions: dict[str, str] = {
+            "openbb_widgets_primary": "Primary dashboard widget tools",
+            "openbb_widgets_secondary": "Secondary dashboard widget tools",
+            "openbb_widgets_extra": "Additional dashboard widget tools",
+            "openbb_viz_tools": "OpenBB table/chart/html artifact tools",
+            "openbb_mcp_tools": "Workspace-selected MCP tools",
+        }
+        for group_id, _toolset in self._progressive_named_toolsets:
+            if group_id.startswith("openbb_mcp_tools_"):
+                descriptions[group_id] = "Workspace-selected MCP tools"
+            elif group_id not in descriptions:
+                descriptions[group_id] = "Additional OpenBB toolset"
+        return descriptions
+
+    @cached_property
+    def _progressive_toolset(self) -> ToolDiscoveryToolset:
+        return ToolDiscoveryToolset(
+            toolsets=self._progressive_named_toolsets,
+            group_descriptions=self._progressive_group_descriptions,
+            id="openbb_progressive_tools",
+        )
+
     def build_event_stream(self) -> OpenBBAIEventStream:
         """Create the event stream wrapper for this adapter run."""
 
@@ -243,6 +300,12 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 )
                 lines.extend(widget_defaults)
                 lines.append("</widget_defaults>")
+
+        if self.enable_progressive_tool_discovery and self._toolsets:
+            progressive_instructions = self._progressive_toolset.render_instructions()
+            if progressive_instructions:
+                lines.append("")
+                lines.append(progressive_instructions)
 
         return "\n".join(lines)
 
@@ -361,6 +424,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         """Build combined toolset from widget toolsets."""
         if not self._toolsets:
             return None
+        if self.enable_progressive_tool_discovery:
+            return cast(AbstractToolset[OpenBBDeps], self._progressive_toolset)
         if len(self._toolsets) == 1:
             return self._toolsets[0]
         combined = CombinedToolset(
