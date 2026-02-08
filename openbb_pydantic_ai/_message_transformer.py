@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from typing import Any
 
 from openbb_ai.models import (
     LlmClientFunctionCall,
@@ -21,12 +22,21 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.ui import MessagesBuilder
 
+from openbb_pydantic_ai._config import EXECUTE_MCP_TOOL_NAME, GET_WIDGET_DATA_TOOL_NAME
 from openbb_pydantic_ai._serializers import serialize_result
 from openbb_pydantic_ai._utils import extract_tool_call_id
+
+# UI protocol function names that should be rewritten to `call_tools`
+_REWRITABLE_FUNCTIONS = frozenset({GET_WIDGET_DATA_TOOL_NAME, EXECUTE_MCP_TOOL_NAME})
+
+_CALL_TOOLS = "call_tools"
 
 
 class MessageTransformer:
     """Transforms OpenBB messages to Pydantic AI messages."""
+
+    def __init__(self, *, rewrite_deferred_tool_names: bool = False) -> None:
+        self._rewrite = rewrite_deferred_tool_names
 
     def transform_batch(self, messages: Sequence[LlmMessage]) -> list[ModelMessage]:
         """Transform a batch of OpenBB messages to Pydantic AI messages.
@@ -42,22 +52,23 @@ class MessageTransformer:
             List of Pydantic AI messages
         """
         tool_call_id_map = self._build_tool_call_id_map(messages)
+        tool_name_map = self._build_tool_name_map(messages) if self._rewrite else {}
         call_counters: dict[str, int] = {}
 
         builder = MessagesBuilder()
         for message in messages:
             if isinstance(message, LlmClientMessage):
                 self._add_client_message(
-                    builder, message, tool_call_id_map, call_counters
+                    builder, message, tool_call_id_map, call_counters, tool_name_map
                 )
             elif isinstance(message, LlmClientFunctionCallResultMessage):
-                self._add_result_message(builder, message)
+                self._add_result_message(builder, message, tool_name_map)
         return builder.messages
 
     def _build_tool_call_id_map(
         self, messages: Sequence[LlmMessage]
     ) -> dict[str, list[str]]:
-        """Build a lookup of function_name → all tool_call_ids in order.
+        """Build a lookup of function_name -> all tool_call_ids in order.
 
         Since the same function (e.g., get_widget_data) can be called multiple times,
         this accumulates ALL tool_call_ids for each function across all result messages,
@@ -94,12 +105,70 @@ class MessageTransformer:
 
         return dict(id_map)
 
+    @staticmethod
+    def _build_tool_name_map(messages: Sequence[LlmMessage]) -> dict[str, str]:
+        """Build tool_call_id -> pydantic-ai tool_name from extra_state.
+
+        Used when rewriting UI protocol names (get_widget_data, execute_agent_tool)
+        back to `call_tools`.
+        """
+        name_map: dict[str, str] = {}
+        for msg in messages:
+            if not isinstance(msg, LlmClientFunctionCallResultMessage):
+                continue
+            extra_state = msg.extra_state or {}
+            tool_calls = extra_state.get("tool_calls", [])
+            if not isinstance(tool_calls, list):
+                continue
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = tc.get("tool_call_id")
+                tc_name = tc.get("tool_name")
+                if isinstance(tc_id, str) and isinstance(tc_name, str):
+                    name_map[tc_id] = tc_name
+        return name_map
+
+    def _rewrite_tool_call(
+        self,
+        function_name: str,
+        tool_call_id: str,
+        args: dict[str, Any] | None,
+        tool_name_map: dict[str, str],
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Rewrite a UI protocol tool call to `call_tools` if applicable."""
+        if not self._should_rewrite(function_name, tool_call_id, tool_name_map):
+            return function_name, args
+
+        pydantic_tool_name = tool_name_map.get(tool_call_id)
+        assert pydantic_tool_name is not None
+
+        # Wrap original args inside call_tools' expected shape
+        return _CALL_TOOLS, {
+            "calls": [{"tool_name": pydantic_tool_name, "arguments": args or {}}],
+        }
+
+    def _should_rewrite(
+        self,
+        function_name: str,
+        tool_call_id: str,
+        tool_name_map: dict[str, str] | None,
+    ) -> bool:
+        """Check whether a specific tool call can be rewritten to `call_tools`."""
+        return bool(
+            self._rewrite
+            and function_name in _REWRITABLE_FUNCTIONS
+            and tool_name_map
+            and tool_call_id in tool_name_map
+        )
+
     def _add_client_message(
         self,
         builder: MessagesBuilder,
         message: LlmClientMessage,
         tool_call_id_map: dict[str, list[str]],
         call_counters: dict[str, int],
+        tool_name_map: dict[str, str],
     ) -> None:
         """Add a client message to the builder.
 
@@ -113,6 +182,8 @@ class MessageTransformer:
             Prebuilt map of function names to tool_call_ids
         call_counters : dict[str, int]
             Counter tracking which tool_call_id index to use per function
+        tool_name_map : dict[str, str]
+            Map of tool_call_id to pydantic-ai tool name for rewriting
         """
         content = message.content
 
@@ -134,11 +205,17 @@ class MessageTransformer:
                             """.strip()
                         )
 
+                    tc_id = tool_call_ids[idx]
+                    source_args: dict[str, Any] = {"data_sources": [data_source]}
+                    rewritten_name, rewritten_args = self._rewrite_tool_call(
+                        function_name, tc_id, source_args, tool_name_map
+                    )
+
                     builder.add(
                         ToolCallPart(
-                            tool_name=function_name,
-                            tool_call_id=tool_call_ids[idx],
-                            args={"data_sources": [data_source]},
+                            tool_name=rewritten_name,
+                            tool_call_id=tc_id,
+                            args=rewritten_args,
                         )
                     )
 
@@ -156,11 +233,15 @@ class MessageTransformer:
             tool_call_id = tool_call_ids[counter]
             call_counters[function_name] = counter + 1
 
+            rewritten_name, rewritten_args = self._rewrite_tool_call(
+                content.function, tool_call_id, content.input_arguments, tool_name_map
+            )
+
             builder.add(
                 ToolCallPart(
-                    tool_name=content.function,
+                    tool_name=rewritten_name,
                     tool_call_id=tool_call_id,
-                    args=content.input_arguments,
+                    args=rewritten_args,
                 )
             )
             return
@@ -177,6 +258,7 @@ class MessageTransformer:
         self,
         builder: MessagesBuilder,
         message: LlmClientFunctionCallResultMessage,
+        tool_name_map: dict[str, str] | None = None,
     ) -> None:
         """Add a function call result message to the builder.
 
@@ -189,18 +271,25 @@ class MessageTransformer:
             The message builder to add to
         message : LlmClientFunctionCallResultMessage
             The result message to add
+        tool_name_map : dict[str, str] | None
+            Map of tool_call_id to pydantic-ai tool name for rewriting
         """
         extra_state = message.extra_state or {}
         tool_calls = extra_state.get("tool_calls", [])
 
         if isinstance(tool_calls, list) and len(tool_calls) > 1:
-            self._add_unbatched_results(builder, message)
+            self._add_unbatched_results(builder, message, tool_name_map)
             return
 
         tool_call_id = extract_tool_call_id(message)
+        result_tool_name = message.function
+
+        if self._should_rewrite(result_tool_name, tool_call_id, tool_name_map):
+            result_tool_name = _CALL_TOOLS
+
         builder.add(
             ToolReturnPart(
-                tool_name=message.function,
+                tool_name=result_tool_name,
                 tool_call_id=tool_call_id,
                 content=serialize_result(message),
             )
@@ -210,6 +299,7 @@ class MessageTransformer:
         self,
         builder: MessagesBuilder,
         message: LlmClientFunctionCallResultMessage,
+        tool_name_map: dict[str, str] | None = None,
     ) -> None:
         """Unbatch a result with multiple tool_calls into individual ToolReturnParts.
 
@@ -223,6 +313,8 @@ class MessageTransformer:
             The message builder to add to
         message : LlmClientFunctionCallResultMessage
             The batched result message
+        tool_name_map : dict[str, str] | None
+            Map of tool_call_id to pydantic-ai tool name for rewriting
         """
         extra_state = message.extra_state or {}
         tool_calls = extra_state.get("tool_calls", [])
@@ -238,9 +330,13 @@ class MessageTransformer:
 
             result_data = data[idx] if idx < len(data) else None
 
+            result_tool_name = message.function
+            if self._should_rewrite(result_tool_name, tool_call_id, tool_name_map):
+                result_tool_name = _CALL_TOOLS
+
             builder.add(
                 ToolReturnPart(
-                    tool_name=message.function,
+                    tool_name=result_tool_name,
                     tool_call_id=tool_call_id,
                     content=result_data,
                 )

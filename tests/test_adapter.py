@@ -17,10 +17,17 @@ from openbb_ai.models import (
     WorkspaceState,
 )
 from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.tools import RunContext
+from pydantic_ai.toolsets import FunctionToolset
 
-from openbb_pydantic_ai import OpenBBAIAdapter
+from openbb_pydantic_ai import OpenBBAIAdapter, OpenBBDeps
+from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
 from openbb_pydantic_ai._widget_toolsets import build_widget_tool_name
-from openbb_pydantic_ai.tool_discovery import ToolDiscoveryToolset
+from openbb_pydantic_ai.tool_discovery import (
+    ToolDiscoveryToolset,
+    add_to_progressive,
+    progressive,
+)
 
 
 def test_adapter_injects_instructions(sample_context, make_request, human_message):
@@ -34,7 +41,7 @@ def test_adapter_injects_instructions(sample_context, make_request, human_messag
 
     instructions = adapter.instructions
 
-    assert instructions, "Adapter should inject context instructions"
+    assert instructions
     assert "Test Context" in instructions
     assert "https://example.com" in instructions
 
@@ -68,6 +75,97 @@ def test_adapter_can_disable_progressive_tool_discovery(
     assert adapter.toolset is not None
     assert not isinstance(adapter.toolset, ToolDiscoveryToolset)
     assert "progressive disclosure" not in adapter.instructions
+
+
+@pytest.mark.anyio
+async def test_adapter_merges_tagged_runtime_toolset_into_progressive(
+    make_request, agent_stream_stub
+) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    custom_tools = FunctionToolset[OpenBBDeps]()
+
+    @custom_tools.tool
+    def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
+        _ = ctx
+        return f"Note for {symbol}"
+
+    add_to_progressive(
+        custom_tools,
+        group="custom_agent_tools",
+        description="Custom user toolset",
+    )
+
+    adapter = OpenBBAIAdapter(agent=agent_stream_stub, run_input=request)
+    stream = adapter.run_stream(toolsets=[custom_tools])
+    async for _ in stream:
+        pass
+
+    group_ids = {group_id for group_id, _ in adapter._progressive_named_toolsets}
+    assert "custom_agent_tools" in group_ids
+    assert (
+        adapter._progressive_group_descriptions.get("custom_agent_tools")
+        == "Custom user toolset"
+    )
+
+    _, kwargs = agent_stream_stub.calls[0]
+    # Tagged toolsets are merged into adapter progressive toolset.
+    forwarded = kwargs.get("toolsets")
+    assert forwarded is not None
+    assert len(forwarded) == 1
+    assert isinstance(forwarded[0], ToolDiscoveryToolset)
+    assert all(toolset is not custom_tools for toolset in forwarded)
+
+
+@pytest.mark.anyio
+async def test_adapter_progressive_function_decorator_marks_containing_toolset(
+    make_request, agent_stream_stub
+) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    custom_tools = FunctionToolset[OpenBBDeps]()
+
+    @progressive(
+        toolset=custom_tools,
+        group="decorated_tools",
+        description="Tools marked via @progressive",
+    )
+    @custom_tools.tool
+    def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
+        _ = ctx
+        return f"Note for {symbol}"
+
+    adapter = OpenBBAIAdapter(agent=agent_stream_stub, run_input=request)
+    stream = adapter.run_stream(toolsets=[custom_tools])
+    async for _ in stream:
+        pass
+
+    group_ids = {group_id for group_id, _ in adapter._progressive_named_toolsets}
+    assert "decorated_tools" in group_ids
+
+
+@pytest.mark.anyio
+async def test_adapter_keeps_untagged_runtime_toolsets_standalone(
+    make_request, agent_stream_stub
+) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    custom_tools = FunctionToolset[OpenBBDeps]()
+
+    @custom_tools.tool
+    def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
+        _ = ctx
+        return f"Note for {symbol}"
+
+    adapter = OpenBBAIAdapter(agent=agent_stream_stub, run_input=request)
+    stream = adapter.run_stream(toolsets=[custom_tools])
+    async for _ in stream:
+        pass
+
+    group_ids = {group_id for group_id, _ in adapter._progressive_named_toolsets}
+    assert "custom_agent_tools" not in group_ids
+
+    _, kwargs = agent_stream_stub.calls[0]
+    forwarded = kwargs.get("toolsets")
+    assert forwarded is not None
+    assert any(toolset is custom_tools for toolset in forwarded)
 
 
 def test_adapter_preserves_tool_call_ids(widget_collection, make_request):
@@ -208,7 +306,9 @@ def test_adapter_unbatches_multiple_widget_calls(widget_collection, make_request
         ),
     )
 
-    # Batched result from get_widget_data with both tool_call_ids
+    tool_name = build_widget_tool_name(widget)
+
+    # Batched result from get_widget_data with both tool_call_ids and tool_name
     batched_result = LlmClientFunctionCallResultMessage(
         function="get_widget_data",
         input_arguments={
@@ -236,8 +336,16 @@ def test_adapter_unbatches_multiple_widget_calls(widget_collection, make_request
         ],
         extra_state={
             "tool_calls": [
-                {"tool_call_id": "call_123", "widget_uuid": str(widget.uuid)},
-                {"tool_call_id": "call_456", "widget_uuid": str(widget.uuid)},
+                {
+                    "tool_call_id": "call_123",
+                    "widget_uuid": str(widget.uuid),
+                    "tool_name": tool_name,
+                },
+                {
+                    "tool_call_id": "call_456",
+                    "widget_uuid": str(widget.uuid),
+                    "tool_name": tool_name,
+                },
             ]
         },
     )
@@ -263,20 +371,218 @@ def test_adapter_unbatches_multiple_widget_calls(widget_collection, make_request
         if isinstance(part, ToolReturnPart)
     ]
 
-    assert len(tool_call_parts) == 2  # Unbatched into 2 calls
-    assert len(tool_return_parts) == 2  # Unbatched into 2 returns
+    assert len(tool_call_parts) == 2
+    assert len(tool_return_parts) == 2
 
     # Each call should match a return via tool_call_id
     call_ids = {p.tool_call_id for p in tool_call_parts}
     return_ids = {p.tool_call_id for p in tool_return_parts}
     assert call_ids == return_ids == {"call_123", "call_456"}
 
-    # Each call should have a single data_source (unbatched)
+    # With progressive discovery enabled (default), calls are rewritten to call_tools
     for part in tool_call_parts:
-        data_sources = (
-            part.args.get("data_sources", []) if isinstance(part.args, dict) else []
-        )
-        assert len(data_sources) == 1
+        assert part.tool_name == "call_tools"
+        assert isinstance(part.args, dict)
+        calls = part.args["calls"]
+        assert len(calls) == 1
+        assert calls[0]["tool_name"] == tool_name
+
+    for part in tool_return_parts:
+        assert part.tool_name == "call_tools"
+
+
+def test_adapter_rewrites_get_widget_data_to_call_tools(
+    widget_collection, make_request
+) -> None:
+    """With progressive discovery, get_widget_data calls are rewritten to call_tools."""
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+
+    call_message = LlmClientMessage(
+        role=RoleEnum.ai,
+        content=LlmClientFunctionCall(
+            function=GET_WIDGET_DATA_TOOL_NAME,
+            input_arguments={
+                "data_sources": [
+                    {
+                        "widget_uuid": str(widget.uuid),
+                        "input_args": {"symbol": "CDE"},
+                    }
+                ]
+            },
+        ),
+    )
+    result_message = LlmClientFunctionCallResultMessage(
+        function=GET_WIDGET_DATA_TOOL_NAME,
+        input_arguments={
+            "data_sources": [
+                {
+                    "widget_uuid": str(widget.uuid),
+                    "input_args": {"symbol": "CDE"},
+                }
+            ]
+        },
+        data=[ClientCommandResult(status="success", message=None)],
+        extra_state={
+            "tool_calls": [
+                {
+                    "tool_call_id": "call-rewrite-1",
+                    "widget_uuid": str(widget.uuid),
+                    "tool_name": tool_name,
+                }
+            ]
+        },
+    )
+
+    request = make_request(
+        [call_message, result_message],
+        widgets=widget_collection,
+    )
+    adapter = OpenBBAIAdapter(agent=MagicMock(), run_input=request)
+
+    tool_call_parts = [
+        part
+        for message in adapter.messages
+        for part in getattr(message, "parts", [])
+        if isinstance(part, ToolCallPart)
+    ]
+    tool_return_parts = [
+        part
+        for message in adapter.messages
+        for part in getattr(message, "parts", [])
+        if isinstance(part, ToolReturnPart)
+    ]
+
+    assert len(tool_call_parts) == 1
+    assert tool_call_parts[0].tool_name == "call_tools"
+    calls = tool_call_parts[0].args["calls"]
+    assert len(calls) == 1
+    assert calls[0]["tool_name"] == tool_name
+
+    assert len(tool_return_parts) == 1
+    assert tool_return_parts[0].tool_name == "call_tools"
+
+
+def test_adapter_no_rewrite_when_progressive_disabled(
+    widget_collection, make_request
+) -> None:
+    """Without progressive discovery, tool names pass through unchanged."""
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+
+    call_message = LlmClientMessage(
+        role=RoleEnum.ai,
+        content=LlmClientFunctionCall(
+            function=tool_name,
+            input_arguments={"symbol": "AAPL"},
+        ),
+    )
+    result_message = LlmClientFunctionCallResultMessage(
+        function=tool_name,
+        input_arguments={"symbol": "AAPL"},
+        data=[ClientCommandResult(status="success", message=None)],
+        extra_state={"tool_calls": [{"tool_call_id": "tool-no-rewrite"}]},
+    )
+
+    request = make_request(
+        [call_message, result_message],
+        widgets=widget_collection,
+    )
+    adapter = OpenBBAIAdapter(
+        agent=MagicMock(),
+        run_input=request,
+        enable_progressive_tool_discovery=False,
+    )
+
+    tool_call_parts = [
+        part
+        for message in adapter.messages
+        for part in getattr(message, "parts", [])
+        if isinstance(part, ToolCallPart)
+    ]
+
+    assert len(tool_call_parts) == 1
+    assert tool_call_parts[0].tool_name == tool_name
+
+
+def test_adapter_rewrite_is_gated_by_tool_call_id_mapping(
+    widget_collection, make_request
+) -> None:
+    """Only tool_call_ids with a tool_name mapping should rewrite to call_tools."""
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+
+    call_a = LlmClientMessage(
+        role=RoleEnum.ai,
+        content=LlmClientFunctionCall(
+            function=GET_WIDGET_DATA_TOOL_NAME,
+            input_arguments={
+                "data_sources": [
+                    {"widget_uuid": str(widget.uuid), "input_args": {"symbol": "AAPL"}}
+                ]
+            },
+        ),
+    )
+    result_a = LlmClientFunctionCallResultMessage(
+        function=GET_WIDGET_DATA_TOOL_NAME,
+        input_arguments={
+            "data_sources": [
+                {"widget_uuid": str(widget.uuid), "input_args": {"symbol": "AAPL"}}
+            ]
+        },
+        data=[ClientCommandResult(status="success", message=None)],
+        extra_state={"tool_calls": [{"tool_call_id": "id-a", "tool_name": tool_name}]},
+    )
+
+    call_b = LlmClientMessage(
+        role=RoleEnum.ai,
+        content=LlmClientFunctionCall(
+            function=GET_WIDGET_DATA_TOOL_NAME,
+            input_arguments={
+                "data_sources": [
+                    {"widget_uuid": str(widget.uuid), "input_args": {"symbol": "MSFT"}}
+                ]
+            },
+        ),
+    )
+    result_b = LlmClientFunctionCallResultMessage(
+        function=GET_WIDGET_DATA_TOOL_NAME,
+        input_arguments={
+            "data_sources": [
+                {"widget_uuid": str(widget.uuid), "input_args": {"symbol": "MSFT"}}
+            ]
+        },
+        data=[ClientCommandResult(status="success", message=None)],
+        # Intentionally missing `tool_name` for id-b to simulate partial metadata.
+        extra_state={"tool_calls": [{"tool_call_id": "id-b"}]},
+    )
+
+    request = make_request(
+        [call_a, result_a, call_b, result_b],
+        widgets=widget_collection,
+    )
+    adapter = OpenBBAIAdapter(agent=MagicMock(), run_input=request)
+
+    call_parts = [
+        part
+        for message in adapter.messages
+        for part in getattr(message, "parts", [])
+        if isinstance(part, ToolCallPart)
+    ]
+    return_parts = [
+        part
+        for message in adapter.messages
+        for part in getattr(message, "parts", [])
+        if isinstance(part, ToolReturnPart)
+    ]
+
+    call_names = {part.tool_call_id: part.tool_name for part in call_parts}
+    return_names = {part.tool_call_id: part.tool_name for part in return_parts}
+
+    assert call_names["id-a"] == "call_tools"
+    assert return_names["id-a"] == "call_tools"
+    assert call_names["id-b"] == GET_WIDGET_DATA_TOOL_NAME
+    assert return_names["id-b"] == GET_WIDGET_DATA_TOOL_NAME
 
 
 def test_adapter_preserves_turn_boundaries_without_duplication(make_request):

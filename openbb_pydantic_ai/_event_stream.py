@@ -58,6 +58,7 @@ from openbb_pydantic_ai._dependencies import OpenBBDeps
 from openbb_pydantic_ai._event_stream_components import StreamState
 from openbb_pydantic_ai._event_stream_helpers import (
     ToolCallInfo,
+    _format_meta_tool_call_args,
     artifact_from_output,
     extract_widget_args,
     handle_generic_tool_result,
@@ -419,6 +420,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     "tool_call_id": call.tool_call_id,
                     "widget_uuid": str(widget.uuid),
                     "widget_id": widget.widget_id,
+                    "tool_name": effective_tool_name,
                 }
             )
 
@@ -461,19 +463,53 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     def _extract_effective_tool_call(
         tool_name: str, args: dict[str, Any]
     ) -> tuple[str, dict[str, Any]]:
-        """Map meta `call_tool(...)` invocations to the nested target tool."""
-        if tool_name != "call_tool":
+        """Map meta `call_tools(...)` invocations to the nested target tool."""
+        if tool_name != "call_tools":
+            return tool_name, OpenBBAIEventStream._normalize_widget_tool_args(
+                tool_name, args
+            )
+
+        calls = args.get("calls")
+        if not isinstance(calls, list) or len(calls) != 1:
             return tool_name, args
 
-        nested_name = args.get("tool_name")
+        entry = calls[0]
+        if not isinstance(entry, dict):
+            return tool_name, args
+
+        nested_name = entry.get("tool_name")
         if not isinstance(nested_name, str) or not nested_name:
             return tool_name, args
 
-        nested_args = args.get("arguments", {})
+        nested_args = entry.get("arguments", {})
         if not isinstance(nested_args, dict):
             nested_args = {}
 
-        return nested_name, normalize_args(nested_args)
+        return nested_name, OpenBBAIEventStream._normalize_widget_tool_args(
+            nested_name, normalize_args(nested_args)
+        )
+
+    @staticmethod
+    def _normalize_widget_tool_args(
+        tool_name: str, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Unwrap accidental get_widget_data-style envelopes for widget tools."""
+        if not tool_name.startswith("openbb_widget_"):
+            return args
+
+        current = args
+        for _ in range(3):
+            data_sources = current.get("data_sources")
+            if not isinstance(data_sources, list) or len(data_sources) != 1:
+                break
+            first = data_sources[0]
+            if not isinstance(first, dict):
+                break
+            inner = first.get("input_args")
+            if not isinstance(inner, dict):
+                break
+            current = inner
+        return normalize_args(current)
 
     async def handle_function_tool_call(
         self, event: FunctionToolCallEvent
@@ -502,8 +538,12 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             args=effective_args,
         )
 
-        formatted_args = format_args(effective_args)
-        details = formatted_args if formatted_args else None
+        meta_details = _format_meta_tool_call_args(effective_tool_name, effective_args)
+        if meta_details is not None:
+            details: dict[str, Any] | None = meta_details
+        else:
+            formatted_args = format_args(effective_args)
+            details = formatted_args if formatted_args else None
         yield reasoning_step(f"Calling tool '{effective_tool_name}'", details=details)
 
     async def handle_function_tool_result(
@@ -570,6 +610,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         if isinstance(content, (MessageChunkSSE, StatusUpdateSSE)):
             yield content
+            return
+
+        if isinstance(content, DeferredToolRequests):
+            async for sse in self._handle_deferred_tool_requests(content):
+                yield sse
             return
 
         if call_info is None:

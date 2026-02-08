@@ -124,6 +124,35 @@ def test_event_stream_emits_widget_requests_and_citations(
     assert first_citation.details == [format_args({"symbol": "AAPL"})]
 
 
+def test_widget_extra_state_includes_tool_name(widget_collection, make_request) -> None:
+    """Widget deferred requests include the pydantic-ai tool_name in extra_state."""
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    registry = WidgetRegistry()
+    registry._by_tool_name[tool_name] = widget
+    stream = OpenBBAIEventStream(run_input=request, widget_registry=registry)
+
+    deferred = DeferredToolRequests()
+    deferred.calls.append(
+        ToolCallPart(
+            tool_name=tool_name, tool_call_id="call-extra", args={"symbol": "AAPL"}
+        )
+    )
+    run_result_event = AgentRunResultEvent(result=AgentRunResult(output=deferred))
+
+    events = _collect_events(stream.handle_run_result(run_result_event))
+    function_calls = [e for e in events if e.event == "copilotFunctionCall"]
+    assert len(function_calls) == 1
+
+    extra_state = function_calls[0].data.extra_state
+    assert extra_state is not None
+    tool_calls = extra_state["tool_calls"]
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["tool_name"] == tool_name
+    assert tool_calls[0]["tool_call_id"] == "call-extra"
+
+
 def test_discovery_wrapped_widget_deferred_request_routes_to_widget_api(
     widget_collection, make_request
 ) -> None:
@@ -137,11 +166,68 @@ def test_discovery_wrapped_widget_deferred_request_routes_to_widget_api(
     deferred = DeferredToolRequests()
     deferred.calls.append(
         ToolCallPart(
-            tool_name="call_tool",
+            tool_name="call_tools",
             tool_call_id="call-meta-widget",
             args={
-                "tool_name": tool_name,
-                "arguments": {"symbol": "AAPL"},
+                "calls": [
+                    {"tool_name": tool_name, "arguments": {"symbol": "AAPL"}},
+                ],
+            },
+        )
+    )
+
+    events = _collect_events(
+        stream.handle_run_result(
+            AgentRunResultEvent(result=AgentRunResult(output=deferred))
+        )
+    )
+
+    function_calls = [e for e in events if e.event == "copilotFunctionCall"]
+    assert len(function_calls) == 1
+    function_call = function_calls[0]
+    assert function_call.data.function == GET_WIDGET_DATA_TOOL_NAME
+    data_sources = function_call.data.input_arguments.get("data_sources", [])
+    assert data_sources
+    first_source = data_sources[0]
+    input_args = (
+        first_source["input_args"]
+        if isinstance(first_source, dict)
+        else getattr(first_source, "input_args", None)
+    )
+    assert input_args == {"symbol": "AAPL"}
+
+
+def test_discovery_wrapped_widget_request_unwraps_data_sources_args(
+    widget_collection, make_request
+) -> None:
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    registry = WidgetRegistry()
+    registry._by_tool_name[tool_name] = widget
+    stream = OpenBBAIEventStream(run_input=request, widget_registry=registry)
+
+    deferred = DeferredToolRequests()
+    deferred.calls.append(
+        ToolCallPart(
+            tool_name="call_tools",
+            tool_call_id="call-meta-widget-unwrapped",
+            args={
+                "calls": [
+                    {
+                        "tool_name": tool_name,
+                        "arguments": {
+                            "data_sources": [
+                                {
+                                    "widget_uuid": str(widget.uuid),
+                                    "origin": widget.origin,
+                                    "id": widget.widget_id,
+                                    "input_args": {"symbol": "AAPL"},
+                                }
+                            ]
+                        },
+                    },
+                ],
             },
         )
     )
@@ -185,11 +271,12 @@ def test_discovery_wrapped_mcp_deferred_request_routes_to_execute_agent_tool(
     deferred = DeferredToolRequests()
     deferred.calls.append(
         ToolCallPart(
-            tool_name="call_tool",
+            tool_name="call_tools",
             tool_call_id="call-meta-mcp",
             args={
-                "tool_name": agent_tool.name,
-                "arguments": {"query": "select 1"},
+                "calls": [
+                    {"tool_name": agent_tool.name, "arguments": {"query": "select 1"}},
+                ],
             },
         )
     )
@@ -206,6 +293,61 @@ def test_discovery_wrapped_mcp_deferred_request_routes_to_execute_agent_tool(
     assert function_call.data.function == EXECUTE_MCP_TOOL_NAME
     assert function_call.data.input_arguments["tool_name"] == agent_tool.name
     assert function_call.data.input_arguments["parameters"] == {"query": "select 1"}
+
+
+def test_call_tool_function_result_with_deferred_requests_routes_to_widget_api(
+    widget_collection, make_request
+) -> None:
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    registry = WidgetRegistry()
+    registry._by_tool_name[tool_name] = widget
+    stream = OpenBBAIEventStream(run_input=request, widget_registry=registry)
+
+    call_event = FunctionToolCallEvent(
+        part=ToolCallPart(
+            tool_name="call_tools",
+            tool_call_id="meta-1",
+            args={
+                "calls": [
+                    {"tool_name": tool_name, "arguments": {"symbol": "SILJ"}},
+                ],
+            },
+        )
+    )
+    _collect_events(stream.handle_function_tool_call(call_event))
+
+    deferred = DeferredToolRequests()
+    deferred.calls.append(
+        ToolCallPart(
+            tool_name=tool_name,
+            tool_call_id="ext-1",
+            args={"symbol": "SILJ"},
+        )
+    )
+    result_event = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name="call_tools",
+            tool_call_id="meta-1",
+            content=deferred,
+        )
+    )
+
+    events = _collect_events(stream.handle_function_tool_result(result_event))
+    function_calls = [e for e in events if e.event == "copilotFunctionCall"]
+    assert len(function_calls) == 1
+    function_call = function_calls[0]
+    assert function_call.data.function == GET_WIDGET_DATA_TOOL_NAME
+    data_sources = function_call.data.input_arguments.get("data_sources", [])
+    assert data_sources
+    first_source = data_sources[0]
+    input_args = (
+        first_source["input_args"]
+        if isinstance(first_source, dict)
+        else getattr(first_source, "input_args", None)
+    )
+    assert input_args == {"symbol": "SILJ"}
 
 
 def test_widget_dict_results_render_tool_output(
@@ -356,20 +498,65 @@ def test_non_widget_tool_calls_show_in_reasoning(make_request) -> None:
     assert artifact_step.data.artifacts
 
 
-def test_discovery_call_tool_uses_nested_tool_name(make_request) -> None:
+def test_discovery_call_tools_multi_call_shows_formatted_details(
+    make_request,
+) -> None:
+    """Multi-call call_tools should show tool count and names, not raw args."""
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
     stream = OpenBBAIEventStream(run_input=request)
 
     call_event = FunctionToolCallEvent(
         part=ToolCallPart(
-            tool_name="call_tool",
+            tool_name="call_tools",
+            tool_call_id="meta-multi",
+            args={
+                "calls": [
+                    {
+                        "tool_name": "tool_a",
+                        "arguments": {"symbol": "AAPL"},
+                    },
+                    {
+                        "tool_name": "tool_b",
+                        "arguments": {"symbol": "MSFT"},
+                    },
+                ],
+            },
+        )
+    )
+
+    call_events = _collect_events(stream.handle_function_tool_call(call_event))
+    assert call_events
+    status = call_events[0]
+    assert status.event == "copilotStatusUpdate"
+    assert "call_tools" in status.data.message
+    details = status.data.details
+    assert details
+    detail_row = details[0]
+    assert detail_row["Tool count"] == "2"
+    assert "tool_a" in detail_row["Tools"]
+    assert "tool_b" in detail_row["Tools"]
+    # Should not contain raw format_args output
+    assert "list(len=" not in str(detail_row)
+
+
+def test_discovery_call_tools_uses_nested_tool_name(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    call_event = FunctionToolCallEvent(
+        part=ToolCallPart(
+            tool_name="call_tools",
             tool_call_id="meta-42",
             args={
-                "tool_name": "internal_tool",
-                "arguments": {
-                    "query": "AAPL",
-                    "data": [{"value": 1}, {"value": 2}, {"value": 3}],
-                },
+                "calls": [
+                    {
+                        "tool_name": "internal_tool",
+                        "arguments": {
+                            "query": "AAPL",
+                            "data": [{"value": 1}, {"value": 2}, {"value": 3}],
+                        },
+                    },
+                ],
             },
         )
     )
@@ -378,11 +565,11 @@ def test_discovery_call_tool_uses_nested_tool_name(make_request) -> None:
     assert call_events
     assert call_events[0].event == "copilotStatusUpdate"
     assert "internal_tool" in call_events[0].data.message
-    assert "call_tool" not in call_events[0].data.message
+    assert "call_tools" not in call_events[0].data.message
 
     result_event = FunctionToolResultEvent(
         result=ToolReturnPart(
-            tool_name="call_tool",
+            tool_name="call_tools",
             tool_call_id="meta-42",
             content=[{"name": "address", "description": "Address"}],
         )
@@ -670,16 +857,20 @@ def test_discovery_wrapped_chart_tool_replaces_placeholder_inline(make_request) 
 
     call_event = FunctionToolCallEvent(
         part=ToolCallPart(
-            tool_name="call_tool",
+            tool_name="call_tools",
             tool_call_id="chart-meta-1",
             args={
-                "tool_name": CHART_TOOL_NAME,
-                "arguments": {
-                    "type": "line",
-                    "data": [{"period": "Q1", "value": 1}],
-                    "x_key": "period",
-                    "y_keys": ["value"],
-                },
+                "calls": [
+                    {
+                        "tool_name": CHART_TOOL_NAME,
+                        "arguments": {
+                            "type": "line",
+                            "data": [{"period": "Q1", "value": 1}],
+                            "x_key": "period",
+                            "y_keys": ["value"],
+                        },
+                    },
+                ],
             },
         )
     )
@@ -687,7 +878,7 @@ def test_discovery_wrapped_chart_tool_replaces_placeholder_inline(make_request) 
 
     tool_event = FunctionToolResultEvent(
         result=ToolReturnPart(
-            tool_name="call_tool",
+            tool_name="call_tools",
             tool_call_id="chart-meta-1",
             content=None,
             metadata={"chart": _chart_artifact()},

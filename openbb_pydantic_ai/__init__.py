@@ -7,7 +7,9 @@ from openbb_pydantic_ai._dependencies import OpenBBDeps
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
 from openbb_pydantic_ai.tool_discovery import (
     ToolDiscoveryToolset,
-    progressive_toolset,
+    add_to_progressive,
+    get_progressive_config,
+    progressive,
 )
 
 try:
@@ -20,5 +22,7 @@ __all__ = [
     "OpenBBAIEventStream",
     "OpenBBDeps",
     "ToolDiscoveryToolset",
-    "progressive_toolset",
+    "add_to_progressive",
+    "get_progressive_config",
+    "progressive",
 ]

@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import warnings
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pydantic_ai import _function_schema
-from pydantic_ai.tools import GenerateToolJsonSchema, RunContext
+from pydantic_ai import DeferredToolRequests
+from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
 if TYPE_CHECKING:
     from pydantic_ai import ToolsetTool
 
-CallFn = Callable[[RunContext[Any], str, dict[str, Any]], Any | Awaitable[Any]]
 ToolsetSource = AbstractToolset[Any] | tuple[str, AbstractToolset[Any]]
 
 
@@ -24,12 +23,35 @@ _DEFAULT_INSTRUCTIONS = """\
 You have access to tools via progressive disclosure.
 Use these meta-tools to discover and execute tools on demand:
 
-1. `list_tools()` — list all available tool names and short descriptions
-2. `search_tools(query)` — filter tools by name/description
-3. `get_tool_schema(tool_name)` — inspect full JSON parameter schema
-4. `call_tool(tool_name, arguments)` — execute the selected tool
+- `list_tools()` — list all available tool names and short descriptions
+- `search_tools(query)` — filter tools by name/description
+- `get_tool_schema(tool_names)` — inspect one or more tool schemas
+- `call_tools(calls)` — execute one or more tools
 
 Use the workflow: discover -> inspect -> execute.
+Always pass `arguments` as an object/dictionary, never as a JSON string.
+
+Correct:
+```
+call_tools(calls=[
+  {"tool_name": "chart", "arguments": {"symbol": "SILJ"}}
+])
+```
+
+Incorrect:
+```
+call_tools(calls=[
+  {"tool_name": "chart", "arguments": "{\\"symbol\\": \\"SILJ\\"}"}
+])
+```
+
+Batch multiple tools in one call when possible:
+```
+call_tools(calls=[
+  {"tool_name": "tool_a", "arguments": {"symbol": "AAPL"}},
+  {"tool_name": "tool_b", "arguments": {"symbol": "MSFT"}}
+])
+```
 
 <available_tool_groups>
 {tool_groups}
@@ -47,7 +69,6 @@ class _RegisteredTool:
     source_id: str
     source_toolset: AbstractToolset[Any] | None = None
     tool_handle: ToolsetTool[Any] | None = None
-    call_fn: CallFn | None = None
 
 
 class ToolDiscoveryToolset(FunctionToolset[Any]):
@@ -76,7 +97,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             "list_tools",
             "search_tools",
             "get_tool_schema",
-            "call_tool",
+            "call_tools",
         }
         self._exclude_meta_tools = set(exclude_meta_tools or set())
         invalid = self._exclude_meta_tools - valid_meta_tools
@@ -85,9 +106,9 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                 f"Unknown meta-tools: {sorted(invalid)}. "
                 f"Valid names: {sorted(valid_meta_tools)}"
             )
-        if "call_tool" in self._exclude_meta_tools:
+        if "call_tools" in self._exclude_meta_tools:
             warnings.warn(
-                "'call_tool' is excluded; discovered tools cannot be executed.",
+                "'call_tools' is excluded; discovered tools cannot be executed.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -141,17 +162,13 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                 continue
 
             for tool_name, tool_handle in tools.items():
-                tool_def = getattr(tool_handle, "definition", None)
-                if tool_def is None:
-                    warnings.warn(
-                        (
-                            "Could not read definition for tool "
-                            f"'{tool_name}' in '{source_id}'."
-                        ),
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                    continue
+                try:
+                    tool_def = tool_handle.tool_def
+                except AttributeError as exc:
+                    raise RuntimeError(
+                        "Unsupported ToolsetTool shape from pydantic-ai: "
+                        "expected 'tool_def' attribute on tool handles."
+                    ) from exc
 
                 parameters_schema = tool_def.parameters_json_schema or {
                     "type": "object",
@@ -169,96 +186,64 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                     )
                 )
 
-    def discoverable_tool(
-        self,
-        func: Callable[..., Any] | None = None,
-        *,
-        name: str | None = None,
-        description: str | None = None,
-        group: str = "custom",
-    ) -> Any:
-        """Register a function behind the progressive-disclosure layer."""
-
-        def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
-            default_name = getattr(f, "__name__", "tool")
-            tool_name = name or default_name
-            func_schema = _function_schema.function_schema(
-                f,
-                schema_generator=GenerateToolJsonSchema,
-                takes_ctx=None,
-                docstring_format="auto",
-                require_parameter_descriptions=False,
-            )
-            tool_description = description or func_schema.description or ""
-
-            async def _call(
-                call_ctx: RunContext[Any], _: str, args: dict[str, Any]
-            ) -> Any:
-                return await func_schema.call(args, call_ctx)
-
-            self._register_tool(
-                _RegisteredTool(
-                    name=tool_name,
-                    description=tool_description,
-                    schema=func_schema.json_schema,
-                    source_id=group,
-                    call_fn=_call,
-                )
-            )
-            return f
-
-        if func is None:
-            return decorator
-        return decorator(func)
-
-    def register_tool(
-        self,
-        name: str,
-        description: str,
-        schema: dict[str, Any],
-        call_fn: CallFn,
-        *,
-        group: str = "custom",
-    ) -> None:
-        """Register a raw callable for progressive disclosure."""
-        self._register_tool(
-            _RegisteredTool(
-                name=name,
-                description=description,
-                schema=schema,
-                source_id=group,
-                call_fn=call_fn,
-            )
-        )
-
     def _register_meta_tools(self) -> None:
         if "list_tools" not in self._exclude_meta_tools:
 
             @self.tool
             async def list_tools(ctx: RunContext[Any]) -> dict[str, str]:
+                """List available tools and short descriptions.
+
+                Returns:
+                    Mapping of tool name to one-line description.
+                """
                 return await self._list_tools_impl(ctx)
 
         if "search_tools" not in self._exclude_meta_tools:
 
             @self.tool
             async def search_tools(ctx: RunContext[Any], query: str) -> dict[str, str]:
+                """Search tools by keyword in name/description.
+
+                Args:
+                    query: Case-insensitive keyword to match.
+
+                Returns:
+                    Mapping of matching tool names to descriptions.
+                """
                 return await self._search_tools_impl(ctx, query)
 
         if "get_tool_schema" not in self._exclude_meta_tools:
 
             @self.tool
-            async def get_tool_schema(ctx: RunContext[Any], tool_name: str) -> str:
-                return await self._get_tool_schema_impl(ctx, tool_name)
+            async def get_tool_schema(
+                ctx: RunContext[Any],
+                tool_names: list[str],
+            ) -> str:
+                """Return full schema metadata for one or more tools.
 
-        if "call_tool" not in self._exclude_meta_tools:
+                Args:
+                    tool_names: List of exact tool names from `list_tools`.
+                """
+                return await self._get_tool_schema_impl(ctx, tool_names)
+
+        if "call_tools" not in self._exclude_meta_tools:
 
             @self.tool
-            async def call_tool(
+            async def call_tools(
                 ctx: RunContext[Any],
-                tool_name: str,
-                arguments: dict[str, Any] | None = None,
+                calls: list[dict[str, Any]],
             ) -> Any:
-                return await self._call_tool_impl(ctx, tool_name, arguments)
+                """Execute one or more tools.
+
+                Args:
+                    calls: List of tool invocations. Each entry must have
+                        `tool_name` (str) and optionally `arguments` (object).
+                        Example: [
+                            {"tool_name": "widget_a", "arguments": {"symbol": "AAPL"}},
+                            {"tool_name": "widget_b", "arguments": {"symbol": "MSFT"}}
+                        ]
+                """
+                return await self._call_tools_impl(ctx, calls)
 
     async def _list_tools_impl(self, ctx: RunContext[Any]) -> dict[str, str]:
         await self._resolve_pending(ctx)
@@ -271,29 +256,54 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         self, ctx: RunContext[Any], query: str
     ) -> dict[str, str]:
         await self._resolve_pending(ctx)
-        q = query.lower()
+        q = query.strip().lower()
+        if not q:
+            return {}
+        tokens = [token for token in q.replace("_", " ").split() if token]
         return {
             name: tool.description[:200]
             for name, tool in sorted(self._registry.items())
-            if q in name.lower() or q in tool.description.lower()
+            if (
+                q in (haystack := f"{name} {tool.description}".lower())
+                or all(token in haystack for token in tokens)
+            )
         }
 
-    async def _get_tool_schema_impl(self, ctx: RunContext[Any], tool_name: str) -> str:
+    async def _get_tool_schema_impl(
+        self,
+        ctx: RunContext[Any],
+        tool_names: list[str],
+    ) -> str:
         await self._resolve_pending(ctx)
-        tool = self._registry.get(tool_name)
-        if tool is None:
+
+        names = [name for name in tool_names if isinstance(name, str) and name]
+
+        # Preserve order while removing duplicates.
+        deduped_names = list(dict.fromkeys(names))
+        if not deduped_names:
+            raise ValueError("`tool_names` must contain at least one tool name.")
+
+        missing = [name for name in deduped_names if name not in self._registry]
+        if missing:
             available = ", ".join(sorted(self._registry)[:20])
+            missing_display = ", ".join(missing[:20])
             raise ValueError(
-                f"Tool '{tool_name}' not found. Some available tools: {available}"
+                f"Tool(s) not found: {missing_display}. "
+                f"Some available tools: {available}"
             )
 
-        return json.dumps(
+        schemas = [
             {
-                "name": tool.name,
-                "description": tool.description,
-                "group": tool.source_id,
-                "parameters": tool.schema,
-            },
+                "name": self._registry[name].name,
+                "description": self._registry[name].description,
+                "group": self._registry[name].source_id,
+                "parameters": self._registry[name].schema,
+            }
+            for name in deduped_names
+        ]
+
+        return json.dumps(
+            {"tools": schemas, "count": len(schemas)},
             indent=2,
         )
 
@@ -304,31 +314,100 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         arguments: dict[str, Any] | None = None,
     ) -> Any:
         await self._resolve_pending(ctx)
-        tool = self._registry.get(tool_name)
+        resolved_tool_name = tool_name
+        tool = self._registry.get(resolved_tool_name)
         if tool is None:
             available = ", ".join(sorted(self._registry)[:20])
             raise ValueError(
                 f"Tool '{tool_name}' not found. Some available tools: {available}"
             )
 
-        args = arguments or {}
+        if arguments is None:
+            args = {}
+        elif isinstance(arguments, dict):
+            args = arguments
+        else:
+            raise ValueError("Tool arguments must be an object/dictionary.")
+
         if tool.source_toolset is not None and tool.tool_handle is not None:
+            tool_kind = getattr(tool.tool_handle.tool_def, "kind", None)
+            if tool_kind == "external":
+                try:
+                    return await tool.source_toolset.call_tool(
+                        resolved_tool_name,
+                        args,
+                        ctx,
+                        tool.tool_handle,
+                    )
+                except NotImplementedError:
+                    # ExternalToolset from pydantic-ai intentionally raises here.
+                    # Return a deferred request so the normal OpenBB deferred
+                    # execution pipeline can handle it.
+                    deferred = DeferredToolRequests()
+                    deferred.calls.append(
+                        ToolCallPart(
+                            tool_name=resolved_tool_name,
+                            args=args,
+                        )
+                    )
+                    return deferred
+
             return await tool.source_toolset.call_tool(
-                tool_name,
+                resolved_tool_name,
                 args,
                 ctx,
                 tool.tool_handle,
             )
 
-        if tool.call_fn is None:
-            raise RuntimeError(
-                f"Tool '{tool_name}' has no executable callable configured."
+        raise RuntimeError(f"Tool '{tool_name}' has no executable callable configured.")
+
+    async def _call_tools_impl(
+        self,
+        ctx: RunContext[Any],
+        calls: list[dict[str, Any]],
+    ) -> Any:
+        """Execute multiple tools and merge deferred requests."""
+        if not calls:
+            raise ValueError("`calls` must be a non-empty list.")
+        for i, entry in enumerate(calls):
+            if not isinstance(entry, dict) or "tool_name" not in entry:
+                raise ValueError(f"Entry {i} must be an object with a `tool_name` key.")
+
+        results: list[dict[str, Any]] = []
+        immediate_tool_names: list[str] = []
+        deferred_tool_names: list[str] = []
+        merged_deferred: DeferredToolRequests | None = None
+
+        for entry in calls:
+            tool_name = entry["tool_name"]
+            arguments = entry.get("arguments")
+            result = await self._call_tool_impl(ctx, tool_name, arguments)
+
+            if isinstance(result, DeferredToolRequests):
+                if merged_deferred is None:
+                    merged_deferred = DeferredToolRequests()
+                merged_deferred.calls.extend(result.calls)
+                deferred_tool_names.append(tool_name)
+            else:
+                results.append({"tool_name": tool_name, "result": result})
+                immediate_tool_names.append(tool_name)
+
+        if merged_deferred is not None and results:
+            deferred_display = ", ".join(sorted(set(deferred_tool_names))[:12])
+            immediate_display = ", ".join(sorted(set(immediate_tool_names))[:12])
+            raise ValueError(
+                "The `call_tools` batch mixed deferred tools and immediate tools. "
+                f"Deferred tools: {deferred_display}. "
+                f"Immediate tools: {immediate_display}. "
+                "Split them into separate `call_tools` calls: first run immediate "
+                "tools together, then run deferred tools together."
             )
 
-        result = tool.call_fn(ctx, tool_name, args)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        if merged_deferred is not None:
+            return merged_deferred
+        if len(results) == 1:
+            return results[0]["result"]
+        return results
 
     async def get_instructions(self, ctx: RunContext[Any]) -> str | None:
         await self._resolve_pending(ctx)
@@ -379,22 +458,9 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         tool_groups = (
             "\n".join(lines) if lines else '<group name="none" tool_count="0" />'
         )
-        return self._instruction_template.format(tool_groups=tool_groups)
+        return self._instruction_template.replace("{tool_groups}", tool_groups)
 
     @property
     def discovered_tools(self) -> dict[str, str]:
         """Snapshot of currently discovered tool names and descriptions."""
         return {name: tool.description for name, tool in sorted(self._registry.items())}
-
-
-def progressive_toolset(
-    *toolsets: AbstractToolset[Any],
-    group_descriptions: dict[str, str] | None = None,
-    **kwargs: Any,
-) -> ToolDiscoveryToolset:
-    """Shorthand helper for wrapping multiple toolsets."""
-    return ToolDiscoveryToolset(
-        toolsets=list(toolsets),
-        group_descriptions=group_descriptions,
-        **kwargs,
-    )

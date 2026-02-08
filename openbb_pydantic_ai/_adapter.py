@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,13 +22,11 @@ from openbb_ai.models import (
 from pydantic_ai.agent import AbstractAgent, AgentMetadata
 from pydantic_ai.agent.abstract import Instructions
 from pydantic_ai.builtin_tools import AbstractBuiltinTool
-from pydantic_ai.messages import (
-    ModelMessage,
-)
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.output import OutputSpec
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.toolsets import AbstractToolset, CombinedToolset
+from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
 from pydantic_ai.ui import OnCompleteFunc, UIAdapter
 from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import override
@@ -41,6 +40,10 @@ from openbb_pydantic_ai._viz_toolsets import build_viz_toolsets
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 from openbb_pydantic_ai._widget_toolsets import build_widget_toolsets
 from openbb_pydantic_ai.tool_discovery import ToolDiscoveryToolset
+from openbb_pydantic_ai.tool_discovery.progressive import (
+    ProgressiveConfig,
+    get_progressive_config,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai import DeferredToolResults
@@ -60,6 +63,13 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     _registry: WidgetRegistry = field(init=False)
     _base_messages: list[LlmMessage] = field(init=False)
     _pending_results: list[LlmClientFunctionCallResultMessage] = field(init=False)
+    _runtime_progressive_toolsets: tuple[
+        tuple[str, AbstractToolset[OpenBBDeps]], ...
+    ] = field(init=False, default=())
+    _runtime_progressive_descriptions: dict[str, str] = field(
+        init=False,
+        default_factory=dict,
+    )
 
     def __post_init__(self) -> None:
         (
@@ -68,7 +78,9 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         ) = self._split_messages(self.run_input.messages)
 
         # Initialize transformer and registry
-        self._transformer = MessageTransformer()
+        self._transformer = MessageTransformer(
+            rewrite_deferred_tool_names=self.enable_progressive_tool_discovery,
+        )
         self._registry = WidgetRegistry(
             collection=self.run_input.widgets,
             toolsets=self._widget_toolsets,
@@ -219,6 +231,9 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             for index, toolset in enumerate(mcp_toolsets):
                 named.append((f"openbb_mcp_tools_{index}", toolset))
 
+        if self._runtime_progressive_toolsets:
+            named.extend(self._runtime_progressive_toolsets)
+
         return tuple(named)
 
     @cached_property
@@ -235,6 +250,9 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 descriptions[group_id] = "Workspace-selected MCP tools"
             elif group_id not in descriptions:
                 descriptions[group_id] = "Additional OpenBB toolset"
+
+        if self._runtime_progressive_descriptions:
+            descriptions.update(self._runtime_progressive_descriptions)
         return descriptions
 
     @cached_property
@@ -244,6 +262,110 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             group_descriptions=self._progressive_group_descriptions,
             id="openbb_progressive_tools",
         )
+
+    @staticmethod
+    def _function_tool_callable(tool: Any) -> Any | None:
+        for attr in ("func", "function", "_func"):
+            candidate = getattr(tool, attr, None)
+            if callable(candidate):
+                return candidate
+        return None
+
+    def _infer_progressive_config_from_functions(
+        self, toolset: AbstractToolset[OpenBBDeps]
+    ) -> ProgressiveConfig | None:
+        if not isinstance(toolset, FunctionToolset):
+            return None
+
+        tools_map = getattr(toolset, "tools", None)
+        if not isinstance(tools_map, dict):
+            return None
+
+        matched_configs: list[ProgressiveConfig] = []
+        for tool in tools_map.values():
+            func = self._function_tool_callable(tool)
+            if func is None:
+                continue
+            cfg = get_progressive_config(func)
+            if cfg is not None:
+                matched_configs.append(cfg)
+
+        if not matched_configs:
+            return None
+
+        groups = {cfg.group for cfg in matched_configs if cfg.group}
+        if len(groups) > 1:
+            warnings.warn(
+                "Multiple @progressive groups were used in one FunctionToolset. "
+                "Using toolset id/default group for this toolset.",
+                UserWarning,
+                stacklevel=2,
+            )
+            group: str | None = None
+        else:
+            group = next(iter(groups)) if groups else None
+
+        descriptions = [cfg.description for cfg in matched_configs if cfg.description]
+        description = descriptions[0] if descriptions else None
+        return ProgressiveConfig(group=group, description=description)
+
+    def _progressive_config_for_toolset(
+        self, toolset: AbstractToolset[OpenBBDeps]
+    ) -> ProgressiveConfig | None:
+        direct = get_progressive_config(toolset)
+        if direct is not None:
+            return direct
+        return self._infer_progressive_config_from_functions(toolset)
+
+    def _apply_runtime_progressive_toolsets(
+        self,
+        toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None,
+    ) -> Sequence[AbstractToolset[OpenBBDeps]] | None:
+        if not self.enable_progressive_tool_discovery or not toolsets:
+            return toolsets
+
+        used_group_ids = {group_id for group_id, _ in self._progressive_named_toolsets}
+        runtime_named: list[tuple[str, AbstractToolset[OpenBBDeps]]] = []
+        runtime_descriptions: dict[str, str] = {}
+        passthrough: list[AbstractToolset[OpenBBDeps]] = []
+
+        for index, toolset in enumerate(toolsets):
+            cfg = self._progressive_config_for_toolset(toolset)
+            if cfg is None:
+                passthrough.append(toolset)
+                continue
+
+            base_group = cfg.group or str(
+                getattr(toolset, "id", None) or f"user_toolset_{index}"
+            )
+            group_id = base_group
+            suffix = 1
+            while group_id in used_group_ids:
+                group_id = f"{base_group}_{suffix}"
+                suffix += 1
+            used_group_ids.add(group_id)
+
+            runtime_named.append((group_id, toolset))
+            if cfg.description:
+                runtime_descriptions[group_id] = cfg.description
+
+        if not runtime_named:
+            return toolsets
+
+        self._runtime_progressive_toolsets = tuple(runtime_named)
+        self._runtime_progressive_descriptions = runtime_descriptions
+
+        # Recompute all cached values that include progressive toolset/instructions.
+        for cache_name in (
+            "_progressive_named_toolsets",
+            "_progressive_group_descriptions",
+            "_progressive_toolset",
+            "instructions",
+            "toolset",
+        ):
+            self.__dict__.pop(cache_name, None)
+
+        return tuple(passthrough) if passthrough else None
 
     def build_event_stream(self) -> OpenBBAIEventStream:
         """Create the event stream wrapper for this adapter run."""
@@ -508,6 +630,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         deps, messages, and deferred results.
         """
         resolved_deps: OpenBBDeps = deps or self.deps
+        toolsets = self._apply_runtime_progressive_toolsets(toolsets)
 
         # Merge dynamic dashboard context with caller-provided instructions
         combined_instructions = self.instructions
@@ -558,6 +681,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     ):
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
         resolved_deps: OpenBBDeps = deps or self.deps
+        toolsets = self._apply_runtime_progressive_toolsets(toolsets)
 
         # Merge dynamic dashboard context with caller-provided instructions
         combined_instructions = self.instructions
