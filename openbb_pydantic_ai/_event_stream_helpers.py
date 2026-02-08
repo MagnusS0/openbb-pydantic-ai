@@ -714,6 +714,16 @@ def _process_data_items(
             )
             continue
 
+        if data_type == "pdf":
+            events.append(
+                reasoning_step(
+                    "PDF content received but could not be extracted. "
+                    'Install PDF support: pip install "openbb-pydantic-ai[pdf]"',
+                    event_type="WARNING",
+                )
+            )
+            continue
+
         if data_type and data_type not in ("object", "json"):
             events.append(
                 reasoning_step(

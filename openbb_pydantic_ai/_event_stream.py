@@ -61,6 +61,7 @@ from openbb_pydantic_ai._event_stream_helpers import (
     serialized_content_from_result,
     tool_result_events_from_content,
 )
+from openbb_pydantic_ai._pdf_preprocess import preprocess_pdf_in_results
 from openbb_pydantic_ai._stream_parser import StreamParser
 from openbb_pydantic_ai._utils import format_args, normalize_args
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
@@ -107,6 +108,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         self._deferred_results_emitted = True
 
+        # Extract text from any PDF content before passing to the LLM
+        self.pending_results = await preprocess_pdf_in_results(self.pending_results)
+
         # Process any pending deferred tool results from previous requests
         for result_message in self.pending_results:
             async for event in self._process_deferred_result(result_message):
@@ -148,6 +152,12 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 event_type=EVENT_TYPE_WARNING,
             )
 
+        # Extracted PDF text should appear in a reasoning dropdown, not in chat
+        text_label = self._extracted_text_label(result_message, widget_entries)
+        if text_label:
+            yield reasoning_step(f"PDF — {text_label} returned")
+            return
+
         primary_widget: Widget | None = None
         primary_args: dict[str, Any] = {}
         if widget_entries:
@@ -165,6 +175,37 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             call_info, content, widget_entries=widget_entries
         ):
             yield event
+
+    @staticmethod
+    def _extracted_text_label(
+        result_message: LlmClientFunctionCallResultMessage,
+        widget_entries: list[tuple[Widget | None, dict[str, Any]]],
+    ) -> str | None:
+        """Return a display label if all data items are extracted text content.
+
+        This detects results preprocessed by PDF extraction (or any future
+        text-extraction step) and returns a label for the reasoning dropdown
+        instead of streaming content directly to chat.
+        """
+        if not result_message.data:
+            return None
+        from openbb_ai.models import DataContent
+
+        for entry in result_message.data:
+            if not isinstance(entry, DataContent) or not entry.items:
+                return None
+            for item in entry.items:
+                fmt = item.data_format
+                if fmt is None:
+                    return None
+                if getattr(fmt, "parse_as", None) != "text":
+                    return None
+
+        # All items are extracted text — build a label from the widget name
+        for widget, _args in widget_entries:
+            if widget is not None and widget.name:
+                return widget.name
+        return result_message.function
 
     async def _process_mcp_result(
         self, result_message: LlmClientFunctionCallResultMessage
