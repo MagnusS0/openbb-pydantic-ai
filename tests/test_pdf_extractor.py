@@ -2,35 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
 if TYPE_CHECKING:
-    from openbb_pydantic_ai.pdf._types import PdfExtractionResult
-
-docling = pytest.importorskip("docling", reason="docling not installed")
+    pass
 
 
-@pytest.mark.anyio
-async def test_extract_pdf_from_base64(sample_pdf_base64: str) -> None:
-    """Extract text from base64-encoded PDF."""
-    from openbb_pydantic_ai.pdf import extract_pdf_content
+class _LoopStub:
+    def __init__(self, payload):
+        self.payload = payload
 
-    result: PdfExtractionResult = await extract_pdf_content(
-        content=sample_pdf_base64,
-        filename="test.pdf",
-        enable_ocr=False,
-    )
-
-    assert result.text
-    assert result.metadata["filename"] == "test.pdf"
+    async def run_in_executor(self, _executor, _func):
+        return self.payload
 
 
 @pytest.mark.anyio
 async def test_extract_pdf_requires_exactly_one_input() -> None:
     """Raises ValueError when both or neither content/url provided."""
-    from openbb_pydantic_ai.pdf import extract_pdf_content
+    from openbb_pydantic_ai.pdf._extractor import extract_pdf_content
 
     with pytest.raises(ValueError, match="Exactly one"):
         await extract_pdf_content(content="abc", url="http://example.com/test.pdf")
@@ -40,29 +33,82 @@ async def test_extract_pdf_requires_exactly_one_input() -> None:
 
 
 @pytest.mark.anyio
-async def test_extract_pdf_returns_metadata(sample_pdf_base64: str) -> None:
-    """Metadata includes page count and filename."""
-    from openbb_pydantic_ai.pdf import extract_pdf_content
+async def test_extract_pdf_returns_metadata(mocker) -> None:
+    """Metadata includes page count, filename, and stable doc_id."""
+    from openbb_pydantic_ai.pdf import _extractor as extractor
 
-    result = await extract_pdf_content(
-        content=sample_pdf_base64,
+    pdf_bytes = b"fake-pdf-bytes"
+    loop = _LoopStub(
+        ("markdown", [], {"page_count": 1, "filename": "document.pdf"}, object())
+    )
+    mocker.patch.object(
+        extractor,
+        "_load_pdf_bytes",
+        new_callable=AsyncMock,
+        return_value=pdf_bytes,
+    )
+    mocker.patch.object(extractor.asyncio, "get_running_loop", return_value=loop)
+
+    result = await extractor.extract_pdf_content(
+        content="ZmFrZS1iYXNlNjQ=",
         filename="document.pdf",
         enable_ocr=False,
     )
 
     assert "page_count" in result.metadata
     assert result.metadata["filename"] == "document.pdf"
+    assert "doc_id" in result.metadata
+    assert result.metadata["doc_id"] == hashlib.sha256(pdf_bytes).hexdigest()
 
 
 @pytest.mark.anyio
-async def test_extract_pdf_returns_provenance(sample_pdf_base64: str) -> None:
+async def test_extract_pdf_returns_provenance(mocker) -> None:
     """Provenance list is returned for citation support."""
-    from openbb_pydantic_ai.pdf import extract_pdf_content
+    from openbb_pydantic_ai.pdf import _extractor as extractor
 
-    result = await extract_pdf_content(
-        content=sample_pdf_base64,
+    loop = _LoopStub(
+        ("markdown", ["prov"], {"page_count": 1, "filename": "test.pdf"}, object())
+    )
+    mocker.patch.object(
+        extractor,
+        "_load_pdf_bytes",
+        new_callable=AsyncMock,
+        return_value=b"pdf",
+    )
+    mocker.patch.object(extractor.asyncio, "get_running_loop", return_value=loop)
+
+    result = await extractor.extract_pdf_content(
+        content="cGRm",
         filename="test.pdf",
         enable_ocr=False,
     )
 
     assert isinstance(result.provenance, list)
+
+
+@pytest.mark.anyio
+async def test_extract_pdf_document_returns_doc(mocker) -> None:
+    """`extract_pdf_document` should return both result and docling document."""
+    from openbb_pydantic_ai.pdf import _extractor as extractor
+
+    doc = object()
+    pdf_bytes = b"doc-pdf-bytes"
+    loop = _LoopStub(("markdown", [], {"page_count": 2, "filename": "test.pdf"}, doc))
+    mocker.patch.object(
+        extractor,
+        "_load_pdf_bytes",
+        new_callable=AsyncMock,
+        return_value=pdf_bytes,
+    )
+    mocker.patch.object(extractor.asyncio, "get_running_loop", return_value=loop)
+
+    result, returned_doc = await extractor.extract_pdf_document(
+        content="ZG9j",
+        filename="test.pdf",
+        enable_ocr=False,
+    )
+
+    assert result.metadata["filename"] == "test.pdf"
+    assert result.metadata["doc_id"]
+    assert result.metadata["doc_id"] == hashlib.sha256(pdf_bytes).hexdigest()
+    assert returned_doc is doc

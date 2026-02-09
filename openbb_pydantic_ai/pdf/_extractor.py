@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import functools
+import hashlib
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,11 +49,10 @@ def _extract_sync(
     pdf_path: Path,
     *,
     enable_ocr: bool,
-) -> tuple[str, list[Any], dict[str, Any]]:
-    """
-    Synchronous PDF extraction using docling.
+) -> tuple[str, list[Any], dict[str, Any], DoclingDocument]:
+    """Synchronous PDF extraction using docling.
 
-    Returns (text, provenance_items, metadata).
+    Returns (text, provenance_items, metadata, document).
     """
     converter = _get_converter(enable_ocr=enable_ocr, do_table_structure=True)
 
@@ -67,7 +67,27 @@ def _extract_sync(
         "filename": pdf_path.name,
     }
 
-    return text, provenance, metadata
+    return text, provenance, metadata, doc
+
+
+async def _load_pdf_bytes(
+    content: str | None,
+    url: str | None,
+) -> bytes:
+    """Load bytes from base64 content or a remote URL."""
+    if content is not None:
+        return base64.b64decode(content)
+
+    if url is None:
+        msg = "Either 'content' or 'url' must be provided"
+        raise ValueError(msg)
+
+    import httpx
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.content
 
 
 async def extract_pdf_content(
@@ -110,32 +130,64 @@ async def extract_pdf_content(
         msg = "Exactly one of 'content' or 'url' must be provided"
         raise ValueError(msg)
 
+    pdf_bytes = await _load_pdf_bytes(content, url)
+    doc_id = hashlib.sha256(pdf_bytes).hexdigest()
+
     with tempfile.TemporaryDirectory() as tmpdir:
         pdf_path = Path(tmpdir) / filename
-
-        if content is not None:
-            pdf_bytes = base64.b64decode(content)
-            pdf_path.write_bytes(pdf_bytes)
-        else:
-            assert url is not None
-            import httpx
-
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                pdf_path.write_bytes(response.content)
+        pdf_path.write_bytes(pdf_bytes)
 
         loop = asyncio.get_running_loop()
-        text, provenance, metadata = await loop.run_in_executor(
+        text, provenance, metadata, _doc = await loop.run_in_executor(
             None,
             functools.partial(_extract_sync, pdf_path, enable_ocr=enable_ocr),
         )
 
         if url:
             metadata["url"] = url
+        metadata["doc_id"] = doc_id
 
     return PdfExtractionResult(
         text=text,
         provenance=provenance,
         metadata=metadata,
+    )
+
+
+async def extract_pdf_document(
+    content: str | None = None,
+    url: str | None = None,
+    *,
+    filename: str = "document.pdf",
+    enable_ocr: bool = False,
+) -> tuple[PdfExtractionResult, DoclingDocument]:
+    """Extract PDF and return both extraction result and ``DoclingDocument``."""
+    if (content is None) == (url is None):
+        msg = "Exactly one of 'content' or 'url' must be provided"
+        raise ValueError(msg)
+
+    pdf_bytes = await _load_pdf_bytes(content, url)
+    doc_id = hashlib.sha256(pdf_bytes).hexdigest()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = Path(tmpdir) / filename
+        pdf_path.write_bytes(pdf_bytes)
+
+        loop = asyncio.get_running_loop()
+        text, provenance, metadata, doc = await loop.run_in_executor(
+            None,
+            functools.partial(_extract_sync, pdf_path, enable_ocr=enable_ocr),
+        )
+
+        if url:
+            metadata["url"] = url
+        metadata["doc_id"] = doc_id
+
+    return (
+        PdfExtractionResult(
+            text=text,
+            provenance=provenance,
+            metadata=metadata,
+        ),
+        doc,
     )

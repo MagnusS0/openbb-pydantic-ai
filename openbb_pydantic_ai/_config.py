@@ -10,6 +10,7 @@ EXECUTE_MCP_TOOL_NAME = "execute_agent_tool"
 CHART_TOOL_NAME = "openbb_create_chart"
 TABLE_TOOL_NAME = "openbb_create_table"
 HTML_TOOL_NAME = "openbb_create_html"
+PDF_QUERY_TOOL_NAME = "pdf_query"
 CHART_PLACEHOLDER_TOKEN = "{{place_chart_here}}"  # noqa: S105
 CHART_PLACEHOLDER_TOKENS = (CHART_PLACEHOLDER_TOKEN,)
 

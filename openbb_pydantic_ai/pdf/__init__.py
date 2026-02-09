@@ -21,7 +21,7 @@ except ImportError as _import_error:
     ) from _import_error
 
 from openbb_pydantic_ai.pdf._citations import extract_citations_from_provenance
-from openbb_pydantic_ai.pdf._extractor import extract_pdf_content
+from openbb_pydantic_ai.pdf._extractor import extract_pdf_content, extract_pdf_document
 from openbb_pydantic_ai.pdf._types import CitationBoundingBox, PdfExtractionResult
 
 __all__ = [
@@ -29,4 +29,5 @@ __all__ = [
     "PdfExtractionResult",
     "extract_citations_from_provenance",
     "extract_pdf_content",
+    "extract_pdf_document",
 ]
