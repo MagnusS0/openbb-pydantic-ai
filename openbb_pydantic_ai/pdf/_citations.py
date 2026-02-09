@@ -8,38 +8,33 @@ from openbb_pydantic_ai.pdf._types import CitationBoundingBox
 
 
 def extract_citations_from_provenance(
-    provenance_items: list[Any],
+    provenance_items: list[tuple[Any, str]],
     *,
     max_citations: int = 100,
 ) -> list[CitationBoundingBox]:
-    """
-    Convert docling ProvenanceItem objects to citation bounding boxes.
+    """Convert ``(ProvenanceItem, text)`` pairs to citation bounding boxes.
 
-    Each provenance item contains bbox coordinates (l, t, r, b) and a page number.
-    Docling uses BOTTOMLEFT origin by default, but coordinates are passed through
-    as-is since the consumer handles coordinate system differences.
+    Each provenance item contains bbox coordinates (l, t, r, b) and a page
+    number.  Docling uses TOPLEFT origin by default; coordinates are passed
+    through as-is since the consumer handles coordinate system differences.
 
     Parameters
     ----------
     provenance_items
-        List of docling ProvenanceItem or similar objects with `bbox` and `page_no`.
+        List of ``(provenance_item, parent_text)`` tuples where the provenance
+        item has ``bbox`` (with l/t/r/b) and ``page_no`` attributes, and
+        ``parent_text`` is the source text from the owning ``DocItem``.
     max_citations
         Maximum number of citations to return, to avoid overwhelming the UI.
-
-    Returns
-    -------
-    list[CitationBoundingBox]
-        Bounding boxes suitable for citation highlighting.
     """
     citations: list[CitationBoundingBox] = []
 
-    for item in provenance_items:
+    for prov, text in provenance_items:
         if len(citations) >= max_citations:
             break
 
-        bbox = getattr(item, "bbox", None)
-        page_no = getattr(item, "page_no", None)
-        text = getattr(item, "text", "") or ""
+        bbox = getattr(prov, "bbox", None)
+        page_no = getattr(prov, "page_no", None)
 
         if bbox is None or page_no is None:
             continue

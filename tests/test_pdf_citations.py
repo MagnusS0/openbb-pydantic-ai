@@ -25,21 +25,24 @@ class MockProvenanceItem:
 
     page_no: int
     bbox: MockBBox
-    text: str = ""
 
 
 def test_extract_citations_from_provenance_basic() -> None:
     """Basic provenance to citation conversion."""
     items: list[Any] = [
-        MockProvenanceItem(
-            page_no=1,
-            bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0),
-            text="Hello",
+        (
+            MockProvenanceItem(
+                page_no=1,
+                bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0),
+            ),
+            "Hello",
         ),
-        MockProvenanceItem(
-            page_no=2,
-            bbox=MockBBox(l=50.0, t=100.0, r=200.0, b=120.0),
-            text="World",
+        (
+            MockProvenanceItem(
+                page_no=2,
+                bbox=MockBBox(l=50.0, t=100.0, r=200.0, b=120.0),
+            ),
+            "World",
         ),
     ]
 
@@ -67,10 +70,12 @@ def test_extract_citations_from_provenance_basic() -> None:
 def test_extract_citations_max_limit() -> None:
     """Respects max_citations limit."""
     items: list[Any] = [
-        MockProvenanceItem(
-            page_no=i,
-            bbox=MockBBox(l=0.0, t=0.0, r=100.0, b=100.0),
-            text=f"Item {i}",
+        (
+            MockProvenanceItem(
+                page_no=i,
+                bbox=MockBBox(l=0.0, t=0.0, r=100.0, b=100.0),
+            ),
+            f"Item {i}",
         )
         for i in range(10)
     ]
@@ -88,14 +93,15 @@ def test_extract_citations_missing_bbox() -> None:
     @dataclass
     class NoBBox:
         page_no: int
-        text: str = ""
 
     items: list[Any] = [
-        NoBBox(page_no=1, text="No bbox"),
-        MockProvenanceItem(
-            page_no=2,
-            bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0),
-            text="Has bbox",
+        (NoBBox(page_no=1), "No bbox"),
+        (
+            MockProvenanceItem(
+                page_no=2,
+                bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0),
+            ),
+            "Has bbox",
         ),
     ]
 
@@ -111,14 +117,15 @@ def test_extract_citations_missing_page_no() -> None:
     @dataclass
     class NoPage:
         bbox: MockBBox
-        text: str = ""
 
     items: list[Any] = [
-        NoPage(bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0), text="No page"),
-        MockProvenanceItem(
-            page_no=1,
-            bbox=MockBBox(l=50.0, t=60.0, r=150.0, b=80.0),
-            text="Has page",
+        (NoPage(bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0)), "No page"),
+        (
+            MockProvenanceItem(
+                page_no=1,
+                bbox=MockBBox(l=50.0, t=60.0, r=150.0, b=80.0),
+            ),
+            "Has page",
         ),
     ]
 
@@ -129,12 +136,14 @@ def test_extract_citations_missing_page_no() -> None:
 
 
 def test_extract_citations_empty_text() -> None:
-    """Handles items with empty or missing text."""
+    """Handles items with empty text."""
     items: list[Any] = [
-        MockProvenanceItem(
-            page_no=1,
-            bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0),
-            text="",
+        (
+            MockProvenanceItem(
+                page_no=1,
+                bbox=MockBBox(l=10.0, t=20.0, r=100.0, b=40.0),
+            ),
+            "",
         ),
     ]
 

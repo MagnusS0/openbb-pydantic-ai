@@ -35,6 +35,7 @@ from openbb_pydantic_ai._dependencies import OpenBBDeps, build_deps_from_request
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
 from openbb_pydantic_ai._mcp_toolsets import build_mcp_toolsets
 from openbb_pydantic_ai._message_transformer import MessageTransformer
+from openbb_pydantic_ai._pdf_preprocess import preprocess_pdf_in_messages
 from openbb_pydantic_ai._viz_toolsets import build_viz_toolsets
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 from openbb_pydantic_ai._widget_toolsets import build_widget_toolsets
@@ -74,6 +75,34 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     def build_run_input(cls, body: bytes) -> QueryRequest:
         """Parse the raw request body into a ``QueryRequest`` instance."""
         return QueryRequest.model_validate_json(body)
+
+    @classmethod
+    async def from_request(
+        cls,
+        request: Request,
+        *,
+        agent: AbstractAgent[OpenBBDeps, Any],
+    ) -> OpenBBAIAdapter:
+        """Create adapter and preprocess PDF payloads before message transforms."""
+        run_input = cls.build_run_input(await request.body())
+        run_input = await cls._preprocess_run_input(run_input)
+        return cls(
+            agent=agent,
+            run_input=run_input,
+            accept=request.headers.get("accept"),
+        )
+
+    @classmethod
+    async def _preprocess_run_input(cls, run_input: QueryRequest) -> QueryRequest:
+        """Preprocess PDF-bearing result messages in full history."""
+        processed_messages = await preprocess_pdf_in_messages(list(run_input.messages))
+        if len(processed_messages) == len(run_input.messages) and all(
+            old is new
+            for old, new in zip(run_input.messages, processed_messages, strict=False)
+        ):
+            return run_input
+
+        return run_input.model_copy(update={"messages": processed_messages})
 
     @classmethod
     def load_messages(cls, messages: Sequence[LlmMessage]) -> list[ModelMessage]:
@@ -130,9 +159,20 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         return build_mcp_toolsets(self.run_input.tools)
 
     @cached_property
+    def _pdf_toolset(self) -> AbstractToolset[OpenBBDeps] | None:
+        try:
+            from openbb_pydantic_ai.pdf._toolsets import build_pdf_toolset
+        except ImportError:
+            return None
+
+        return build_pdf_toolset()
+
+    @cached_property
     def _toolsets(self) -> tuple[AbstractToolset[OpenBBDeps], ...]:
         toolsets: list[AbstractToolset[OpenBBDeps]] = list(self._widget_toolsets)
         toolsets.append(self._viz_toolset)
+        if self._pdf_toolset is not None:
+            toolsets.append(self._pdf_toolset)
         if self._mcp_toolsets:
             toolsets.extend(
                 cast("Sequence[AbstractToolset[OpenBBDeps]]", self._mcp_toolsets)

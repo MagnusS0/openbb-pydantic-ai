@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openbb_ai.models import LlmClientFunctionCallResultMessage
+from openbb_ai.models import LlmClientFunctionCallResultMessage, LlmMessage
 
 
 async def preprocess_pdf_in_results(
@@ -33,3 +33,34 @@ async def preprocess_pdf_in_results(
         return results
 
     return await _preprocess(results)
+
+
+async def preprocess_pdf_in_messages(messages: list[LlmMessage]) -> list[LlmMessage]:
+    """Pre-process PDF data inside mixed history messages.
+
+    Only ``LlmClientFunctionCallResultMessage`` entries are inspected and
+    transformed. Other message types are returned unchanged.
+    """
+    result_indices: list[int] = []
+    results: list[LlmClientFunctionCallResultMessage] = []
+
+    for idx, message in enumerate(messages):
+        if isinstance(message, LlmClientFunctionCallResultMessage):
+            result_indices.append(idx)
+            results.append(message)
+
+    if not results:
+        return messages
+
+    processed_results = await preprocess_pdf_in_results(results)
+    if len(processed_results) != len(results):
+        return messages
+
+    changed = False
+    merged = list(messages)
+    for idx, processed in zip(result_indices, processed_results, strict=False):
+        if merged[idx] is not processed:
+            changed = True
+        merged[idx] = processed
+
+    return merged if changed else messages

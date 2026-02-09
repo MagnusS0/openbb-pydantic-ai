@@ -8,6 +8,7 @@ import pytest
 from openbb_ai.helpers import chart
 from openbb_ai.models import (
     SSE,
+    Citation,
     DataContent,
     LlmClientFunctionCallResultMessage,
     LlmClientMessage,
@@ -15,6 +16,7 @@ from openbb_ai.models import (
     MessageChunkSSE,
     RoleEnum,
     SingleDataContent,
+    SourceInfo,
     StatusUpdateSSE,
 )
 from pydantic_ai import DeferredToolRequests
@@ -120,6 +122,47 @@ def test_event_stream_emits_widget_requests_and_citations(
     first_citation = citation_events[0].data.citations[0]
     assert first_citation.source_info.metadata.get("input_args") == {"symbol": "AAPL"}
     assert first_citation.details == [format_args({"symbol": "AAPL"})]
+
+
+def test_non_widget_metadata_citations_are_emitted(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    stream._state.register_tool_call(
+        tool_call_id="pdf-call-1",
+        tool_name="pdf_query",
+        args={"doc_id": "abc123"},
+    )
+
+    citation = Citation(
+        source_info=SourceInfo(
+            type="direct retrieval",
+            name="report.pdf",
+            metadata={"doc_id": "abc123"},
+            citable=True,
+        ),
+        details=[{"section": "Introduction"}],
+    )
+    result_event = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name="pdf_query",
+            tool_call_id="pdf-call-1",
+            content="## Introduction\n\nContent",
+            metadata={"citations": [citation]},
+        )
+    )
+
+    events = _collect_events(stream.handle_function_tool_result(result_event))
+    assert events
+
+    after_events = _collect_events(stream.after_stream())
+    citation_events = [
+        event for event in after_events if event.event == "copilotCitationCollection"
+    ]
+    assert citation_events
+    assert (
+        citation_events[0].data.citations[0].source_info.metadata["doc_id"] == "abc123"
+    )
 
 
 def test_widget_dict_results_render_tool_output(

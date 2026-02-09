@@ -49,6 +49,7 @@ from openbb_pydantic_ai._config import (
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
     HTML_TOOL_NAME,
+    PDF_QUERY_TOOL_NAME,
     TABLE_TOOL_NAME,
 )
 from openbb_pydantic_ai._dependencies import OpenBBDeps
@@ -181,11 +182,10 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         result_message: LlmClientFunctionCallResultMessage,
         widget_entries: list[tuple[Widget | None, dict[str, Any]]],
     ) -> str | None:
-        """Return a display label if all data items are extracted text content.
+        """Return a display label if all data items are PDF TOC content.
 
-        This detects results preprocessed by PDF extraction (or any future
-        text-extraction step) and returns a label for the reasoning dropdown
-        instead of streaming content directly to chat.
+        Checks that every item has ``parse_as="text"`` and contains the
+        ``pdf_query`` tool reference, which is injected by PDF preprocessing.
         """
         if not result_message.data:
             return None
@@ -200,8 +200,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     return None
                 if getattr(fmt, "parse_as", None) != "text":
                     return None
+                if PDF_QUERY_TOOL_NAME not in item.content:
+                    return None
 
-        # All items are extracted text — build a label from the widget name
         for widget, _args in widget_entries:
             if widget is not None and widget.name:
                 return widget.name
@@ -525,6 +526,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             if isinstance(viz_artifact, MessageArtifactSSE):
                 return
 
+        self._collect_metadata_citations(getattr(result_part, "metadata", None))
+
         content = result_part.content
         if isinstance(content, MessageArtifactSSE):
             yield content
@@ -638,6 +641,35 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if not self._stream_parser.has_pending_placeholder():
             return []
         return self._text_events_with_artifacts("")
+
+    def _collect_metadata_citations(self, metadata: Any) -> None:
+        """Collect citation payloads attached to tool metadata."""
+        for citation in self._citations_from_metadata(metadata):
+            self._state.add_citation(citation)
+
+    @staticmethod
+    def _citations_from_metadata(metadata: Any) -> list[Citation]:
+        """Parse citation objects from tool metadata payloads."""
+        if not isinstance(metadata, Mapping):
+            return []
+
+        raw = metadata.get("citations")
+        if raw is None:
+            return []
+        raw_items = raw if isinstance(raw, list) else [raw]
+
+        citations_out: list[Citation] = []
+        for item in raw_items:
+            if isinstance(item, Citation):
+                citations_out.append(item)
+                continue
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                citations_out.append(Citation.model_validate(item))
+            except Exception:  # noqa: S112
+                continue
+        return citations_out
 
     @staticmethod
     def _enrich_citation(widget: Widget, citation: Citation) -> Citation:

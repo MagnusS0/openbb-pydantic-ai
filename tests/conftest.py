@@ -110,7 +110,7 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-_PDF_TEST_PATH = Path(__file__).parent.parent / "PDF_TestPage.pdf"
+_PDF_TEST_PATH = Path(__file__).parent / "fixtures" / "PDF_TestPage.pdf"
 
 
 @pytest.fixture
