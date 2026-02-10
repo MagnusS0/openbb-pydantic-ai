@@ -19,8 +19,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      - name: Sync (dev) — locked
-        run: uv sync --locked --dev
+      - name: Sync (dev + pdf extra) — locked
+        run: uv sync --locked --dev --extra pdf
 
       - name: Ruff - lint
         run: uv run ruff check --output-format=github .

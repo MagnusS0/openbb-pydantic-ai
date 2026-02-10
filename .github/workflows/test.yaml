@@ -19,8 +19,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      - name: Sync (dev + extras) — locked
-        run: uv sync --locked --dev
+      - name: Sync (dev + pdf extra) — locked
+        run: uv sync --locked --dev --extra pdf
 
       - name: Run tests
         run: uv run pytest tests --ignore=tests/smoke_test.py
