@@ -150,8 +150,8 @@ async def test_preprocess_converts_pdf_file_reference_to_toc(
             DataFileReferences(
                 items=[
                     SingleFileReference(
-                        url="https://example.com/test.pdf",
-                        data_format=PdfDataFormat(**pdf_data_format),
+                        url="https://example.com/test.pdf",  # type: ignore[arg-type]
+                        data_format=PdfDataFormat(**pdf_data_format),  # type: ignore[arg-type]
                     )
                 ]
             )

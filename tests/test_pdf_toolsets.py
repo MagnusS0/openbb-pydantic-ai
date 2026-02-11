@@ -28,7 +28,7 @@ def _empty_cached_document() -> CachedDocument:
         table_order=(),
     )
     return CachedDocument(
-        doc=object(),
+        doc=object(),  # type: ignore[arg-type]
         filename="report.pdf",
         page_count=10,
         sections=(),
