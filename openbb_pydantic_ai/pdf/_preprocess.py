@@ -430,12 +430,7 @@ async def preprocess_pdf_in_result(
                     modified = True
                 new_items.append(processed)
 
-            new_data.append(
-                DataContent(
-                    items=new_items,
-                    extra_citations=data_entry.extra_citations,
-                )
-            )
+            new_data.append(data_entry.model_copy(update={"items": new_items}))
             continue
 
         # -- DataFileReferences: convert PDF refs to content items --

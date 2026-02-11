@@ -18,6 +18,7 @@ from openbb_ai.models import (
     SSE,
     AgentTool,
     Citation,
+    DataContent,
     FunctionCallSSE,
     FunctionCallSSEData,
     LlmClientFunctionCallResultMessage,
@@ -192,7 +193,6 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         """
         if not result_message.data:
             return None
-        from openbb_ai.models import DataContent
 
         for entry in result_message.data:
             if not isinstance(entry, DataContent) or not entry.items:

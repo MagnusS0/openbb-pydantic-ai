@@ -113,6 +113,9 @@ def read_pages_markdown(
     cached: CachedDocument, start_page: int, end_page: int
 ) -> tuple[str, list[tuple[ProvenanceItem, str]]]:
     """Extract markdown + provenance for a page range."""
+    start_page = max(1, min(start_page, cached.page_count))
+    end_page = max(start_page, min(end_page, cached.page_count))
+
     sections: list[str] = []
     provenance: list[tuple[Any, str]] = []
 
