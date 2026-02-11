@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from inline_snapshot import snapshot
 from pydantic_ai import ToolReturn
 
 from openbb_pydantic_ai.pdf._graph import (
@@ -15,6 +16,7 @@ from openbb_pydantic_ai.pdf._graph import (
     TableInfo,
 )
 from openbb_pydantic_ai.pdf._toolsets import PdfAction, PdfQueryParams, _pdf_query
+from tests.helpers.snapshot_utils import as_builtins
 
 
 def _empty_cached_document() -> CachedDocument:
@@ -92,6 +94,18 @@ def test_pdf_query_read_pages_emits_tool_return_with_citation(mocker) -> None:
     assert isinstance(citations, list)
     assert len(citations) == 1
     assert citations[0].quote_bounding_boxes
+    assert as_builtins(citations[0].quote_bounding_boxes[0]) == snapshot(
+        [
+            {
+                "bottom": 4.0,
+                "page": 2,
+                "text": "sample text",
+                "top": 2.0,
+                "x0": 1.0,
+                "x1": 3.0,
+            }
+        ]
+    )
 
 
 def test_pdf_query_resolves_alias_doc_id_for_citations(mocker) -> None:

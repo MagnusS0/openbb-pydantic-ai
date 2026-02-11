@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import base64
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 
@@ -103,20 +101,6 @@ def widget_with_origin(sample_widget: Widget) -> Callable[[str, str], Widget]:
         return clone
 
     return _factory
-
-
-@pytest.fixture(scope="session")
-def anyio_backend() -> str:
-    return "asyncio"
-
-
-_PDF_TEST_PATH = Path(__file__).parent / "fixtures" / "PDF_TestPage.pdf"
-
-
-@pytest.fixture
-def sample_pdf_base64() -> str:
-    """Load the test PDF as a base64-encoded string."""
-    return base64.b64encode(_PDF_TEST_PATH.read_bytes()).decode()
 
 
 @pytest.fixture

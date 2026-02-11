@@ -22,5 +22,8 @@ jobs:
       - name: Sync (dev + pdf extra) — locked
         run: uv sync --locked --dev --extra pdf
 
-      - name: Run tests
-        run: uv run pytest tests --ignore=tests/smoke_test.py
+      - name: Run regression contract gate
+        run: uv run pytest -m regression_contract
+
+      - name: Run full tests
+        run: uv run pytest tests --ignore=tests/smoke

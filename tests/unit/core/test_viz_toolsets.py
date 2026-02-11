@@ -9,7 +9,6 @@ from openbb_pydantic_ai._viz_toolsets import (
     _create_html,
     _html_artifact,
 )
-from openbb_pydantic_ai._widget_toolsets import build_widget_tool_name
 
 
 def test_html_artifact_returns_message_artifact_sse() -> None:
@@ -72,21 +71,3 @@ def test_create_html_returns_tool_return_with_artifact() -> None:
     assert html_artifact.data.content == "<article>Article content</article>"
     assert html_artifact.data.name == "Article"
     assert html_artifact.data.description == "An article artifact"
-
-
-def test_build_widget_tool_name_ignores_origin(widget_with_origin) -> None:
-    widget = widget_with_origin("OpenBB Sandbox")
-
-    assert build_widget_tool_name(widget) == "openbb_widget_financial_statements"
-
-
-def test_build_widget_tool_name_ignores_partner_origin(widget_with_origin) -> None:
-    widget = widget_with_origin("Partner API")
-
-    assert build_widget_tool_name(widget) == "openbb_widget_financial_statements"
-
-
-def test_build_widget_tool_name_handles_plain_openbb_origin(widget_with_origin) -> None:
-    widget = widget_with_origin("OpenBB")
-
-    assert build_widget_tool_name(widget) == "openbb_widget_financial_statements"

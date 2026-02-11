@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from openbb_pydantic_ai.pdf._graph import build_toc
+from openbb_pydantic_ai.pdf._query import find_section_node, read_section_markdown
+from openbb_pydantic_ai.pdf._store import DocumentStore
+
 
 @dataclass
 class _BBox:
@@ -121,8 +125,6 @@ def _build_doc() -> _FakeDoc:
 
 def test_store_builds_toc_from_cached_doc() -> None:
     """Stored document should produce TOC with doc_id and tool hint."""
-    from openbb_pydantic_ai.pdf._graph import build_toc
-    from openbb_pydantic_ai.pdf._store import DocumentStore
 
     store = DocumentStore()
     doc = _build_doc()
@@ -138,8 +140,6 @@ def test_store_builds_toc_from_cached_doc() -> None:
 
 def test_store_resolves_source_alias_and_section_lookup() -> None:
     """Source aliases should resolve and section matching should work."""
-    from openbb_pydantic_ai.pdf._query import find_section_node, read_section_markdown
-    from openbb_pydantic_ai.pdf._store import DocumentStore
 
     store = DocumentStore()
     doc = _build_doc()
@@ -160,7 +160,6 @@ def test_store_resolves_source_alias_and_section_lookup() -> None:
 
 def test_register_document_source_alias() -> None:
     """Additional aliases should resolve to the same cached document."""
-    from openbb_pydantic_ai.pdf._store import DocumentStore
 
     store = DocumentStore()
     doc = _build_doc()
@@ -178,7 +177,6 @@ def test_register_document_source_alias() -> None:
 
 def test_store_fifo_eviction() -> None:
     """Store should evict oldest entries once max size is exceeded."""
-    from openbb_pydantic_ai.pdf._store import DocumentStore
 
     store = DocumentStore(max_entries=1)
     doc = _build_doc()

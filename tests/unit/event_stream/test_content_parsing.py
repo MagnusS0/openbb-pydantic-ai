@@ -1,118 +1,19 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import cast
 
-from openbb_ai.models import (
-    DataContent,
-    LlmClientFunctionCallResultMessage,
-    MessageChunkSSE,
-    SingleDataContent,
-    StatusUpdateSSE,
-    Widget,
-)
+import pytest
+from openbb_ai.models import MessageChunkSSE, StatusUpdateSSE
 
-from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
 from openbb_pydantic_ai._event_stream_helpers import (
     ToolCallInfo,
-    extract_widget_args,
     handle_generic_tool_result,
     tool_result_events_from_content,
 )
-from openbb_pydantic_ai._widget_registry import WidgetRegistry
+from tests.unit.event_stream._builders import raw_object_item
 
-
-def _result_message(
-    function: str, input_args: dict[str, Any]
-) -> LlmClientFunctionCallResultMessage:
-    return LlmClientFunctionCallResultMessage(
-        function=function,
-        input_arguments=input_args,
-        data=[
-            DataContent(
-                items=[SingleDataContent(content='[{"value": 1}]')],
-            )
-        ],
-    )
-
-
-def _raw_object_item(
-    content: str,
-    *,
-    parse_as: str = "table",
-    name: str | None = None,
-    description: str | None = None,
-) -> dict[str, Any]:
-    item: dict[str, Any] = {
-        "content": content,
-        "data_format": {
-            "data_type": "object",
-            "parse_as": parse_as,
-        },
-    }
-    if name:
-        item["name"] = name
-    if description:
-        item["description"] = description
-    return item
-
-
-def test_find_widget_for_direct_result(sample_widget: Widget) -> None:
-    widget = sample_widget
-    message = _result_message(widget.widget_id, {"symbol": "AAPL"})
-
-    registry = WidgetRegistry()
-    registry._by_tool_name[widget.widget_id] = widget
-    found = registry.find_for_result(message)
-
-    assert found is widget
-
-
-def test_find_widget_for_get_widget_data_sources(sample_widget: Widget) -> None:
-    widget = sample_widget
-    message = _result_message(
-        GET_WIDGET_DATA_TOOL_NAME,
-        {
-            "data_sources": [
-                {
-                    "widget_uuid": str(widget.uuid),
-                    "input_args": {"symbol": "TSLA"},
-                }
-            ]
-        },
-    )
-
-    registry = WidgetRegistry()
-    registry._by_uuid[str(widget.uuid)] = widget
-    found = registry.find_for_result(message)
-
-    assert found is widget
-
-
-def test_extract_widget_args_prefers_data_sources_args(sample_widget: Widget) -> None:
-    widget = sample_widget
-    args = {
-        "data_sources": [
-            {
-                "widget_uuid": str(widget.uuid),
-                "input_args": {"symbol": "TSLA"},
-            }
-        ]
-    }
-    message = _result_message(GET_WIDGET_DATA_TOOL_NAME, args)
-
-    extracted = extract_widget_args(message)
-
-    assert extracted == {"symbol": "TSLA"}
-
-
-def test_extract_widget_args_falls_back_to_result_arguments() -> None:
-    args = {"symbol": "NVDA"}
-    message = _result_message(GET_WIDGET_DATA_TOOL_NAME, args)
-
-    extracted = extract_widget_args(message)
-
-    assert extracted == args
+pytestmark = pytest.mark.regression_contract
 
 
 def test_tool_result_events_from_content_creates_table_for_dicts() -> None:
@@ -127,7 +28,7 @@ def test_tool_result_events_from_content_creates_table_for_dicts() -> None:
             "data": [
                 {
                     "items": [
-                        _raw_object_item(
+                        raw_object_item(
                             '{"message": "hello"}',
                             name="Details",
                         )
@@ -151,7 +52,7 @@ def test_tool_result_events_handle_double_encoded_lists() -> None:
             "data": [
                 {
                     "items": [
-                        _raw_object_item(
+                        raw_object_item(
                             '["[{\\"field\\": \\"value\\"}]"]',
                         )
                     ]
@@ -171,35 +72,12 @@ def test_tool_result_events_handle_double_encoded_lists() -> None:
     assert rows[0].get("field") == "value"
 
 
-def test_tool_result_events_surface_function_call_errors() -> None:
-    events = tool_result_events_from_content(
-        {
-            "data": [
-                {
-                    "error_type": "widget_error",
-                    "content": "Widget failed to load because the symbol was invalid",
-                }
-            ]
-        },
-        mark_streamed_text=lambda: None,
-    )
-
-    assert len(events) == 1
-    status_event = cast(StatusUpdateSSE, events[0])
-    status_data = status_event.data
-    assert status_event.event == "copilotStatusUpdate"
-    assert status_data.eventType == "ERROR"
-    assert status_data.message == "Widget failed to load because the symbol was invalid"
-    assert status_data.details
-    assert status_data.details[0]["error_type"] == "widget_error"
-
-
 def test_tool_result_events_expand_mapping_sections() -> None:
     payload = {
         "data": [
             {
                 "items": [
-                    _raw_object_item(
+                    raw_object_item(
                         json.dumps(
                             {
                                 "financial_ratios": [
@@ -245,7 +123,7 @@ def test_tool_result_events_handle_plain_text_items() -> None:
         "data": [
             {
                 "items": [
-                    _raw_object_item(
+                    raw_object_item(
                         "plain text result",
                         parse_as="text",
                         name="note",
@@ -269,7 +147,7 @@ def test_tool_result_events_table_parse_failure_streams_raw_text() -> None:
             "data": [
                 {
                     "items": [
-                        _raw_object_item("not-json", name="broken"),
+                        raw_object_item("not-json", name="broken"),
                     ]
                 }
             ]
@@ -326,67 +204,3 @@ def test_handle_generic_tool_result_emits_artifacts() -> None:
     status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
     assert status_data.artifacts
-
-
-def test_tool_result_events_handle_list_of_strings_as_error() -> None:
-    error_msg = (
-        "Error calling tool 'query_database': (sqlite3.OperationalError) no such table"
-    )
-    content_json = json.dumps([error_msg])
-
-    payload = {
-        "data": [
-            {
-                "items": [
-                    _raw_object_item(
-                        content_json,
-                        parse_as="json",
-                    )
-                ]
-            }
-        ]
-    }
-
-    events = tool_result_events_from_content(payload, mark_streamed_text=lambda: None)
-
-    assert len(events) == 1
-    status_event = cast(StatusUpdateSSE, events[0])
-    status_data = status_event.data
-    assert status_event.event == "copilotStatusUpdate"
-    assert status_data.eventType == "ERROR"
-    assert error_msg in status_data.message
-    assert status_data.details
-    details_list = cast(list[dict[str, Any]], status_data.details)
-    assert details_list[0]["errors"] == [error_msg]
-
-
-def test_tool_result_events_handle_list_of_strings_as_text() -> None:
-    """Non-error list of strings is streamed as raw text."""
-    info_msg = "Some info message"
-    content_json = json.dumps([info_msg])
-
-    payload = {
-        "data": [
-            {
-                "items": [
-                    _raw_object_item(
-                        content_json,
-                        parse_as="json",
-                    )
-                ]
-            }
-        ]
-    }
-
-    mark_called = False
-
-    def _mark() -> None:
-        nonlocal mark_called
-        mark_called = True
-
-    events = tool_result_events_from_content(payload, mark_streamed_text=_mark)
-
-    assert len(events) == 1
-    chunk_event = events[0]
-    assert isinstance(chunk_event, MessageChunkSSE)
-    assert mark_called

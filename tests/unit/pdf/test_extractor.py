@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openbb_pydantic_ai.pdf import _extractor as extractor
+from openbb_pydantic_ai.pdf._extractor import extract_pdf_content
+
 
 class _LoopStub:
     def __init__(self, payload):
@@ -16,10 +19,8 @@ class _LoopStub:
         return self.payload
 
 
-@pytest.mark.anyio
 async def test_extract_pdf_requires_exactly_one_input() -> None:
     """Raises ValueError when both or neither content/url provided."""
-    from openbb_pydantic_ai.pdf._extractor import extract_pdf_content
 
     with pytest.raises(ValueError, match="Exactly one"):
         await extract_pdf_content(content="abc", url="http://example.com/test.pdf")
@@ -28,10 +29,8 @@ async def test_extract_pdf_requires_exactly_one_input() -> None:
         await extract_pdf_content()
 
 
-@pytest.mark.anyio
 async def test_extract_pdf_returns_metadata(mocker) -> None:
     """Metadata includes page count, filename, and stable doc_id."""
-    from openbb_pydantic_ai.pdf import _extractor as extractor
 
     pdf_bytes = b"fake-pdf-bytes"
     loop = _LoopStub(
@@ -57,10 +56,8 @@ async def test_extract_pdf_returns_metadata(mocker) -> None:
     assert result.metadata["doc_id"] == hashlib.sha256(pdf_bytes).hexdigest()
 
 
-@pytest.mark.anyio
 async def test_extract_pdf_returns_text(mocker) -> None:
     """Text is extracted from PDF content."""
-    from openbb_pydantic_ai.pdf import _extractor as extractor
 
     loop = _LoopStub(("markdown", {"page_count": 1, "filename": "test.pdf"}, object()))
     mocker.patch.object(
@@ -80,10 +77,8 @@ async def test_extract_pdf_returns_text(mocker) -> None:
     assert result.text == "markdown"
 
 
-@pytest.mark.anyio
 async def test_extract_pdf_document_returns_doc(mocker) -> None:
     """`extract_pdf_document` should return both result and docling document."""
-    from openbb_pydantic_ai.pdf import _extractor as extractor
 
     doc = object()
     pdf_bytes = b"doc-pdf-bytes"

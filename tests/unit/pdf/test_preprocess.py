@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from openbb_ai.models import (
     DataContent,
     DataFileReferences,
@@ -14,6 +13,12 @@ from openbb_ai.models import (
     SingleFileReference,
 )
 from pytest_mock import MockerFixture
+
+from openbb_pydantic_ai.pdf import _preprocess as pre
+from openbb_pydantic_ai.pdf._preprocess import (
+    preprocess_pdf_in_result,
+    preprocess_pdf_in_results,
+)
 
 
 def _make_pdf_result(
@@ -56,10 +61,8 @@ def _make_text_result(text: str) -> LlmClientFunctionCallResultMessage:
     )
 
 
-@pytest.mark.anyio
 async def test_preprocess_injects_pdf_toc(mocker: MockerFixture) -> None:
     """PDF content is replaced with a TOC prompt for progressive retrieval."""
-    from openbb_pydantic_ai.pdf._preprocess import preprocess_pdf_in_result
 
     toc = (
         "Document has been extracted, here is the table of contents:\n\n"
@@ -87,10 +90,8 @@ async def test_preprocess_injects_pdf_toc(mocker: MockerFixture) -> None:
     assert "pdf_query" in item.content
 
 
-@pytest.mark.anyio
 async def test_preprocess_preserves_non_pdf_content() -> None:
     """Non-PDF content is left unchanged."""
-    from openbb_pydantic_ai.pdf._preprocess import preprocess_pdf_in_result
 
     message = _make_text_result('{"data": "test"}')
     processed = await preprocess_pdf_in_result(message)
@@ -99,10 +100,8 @@ async def test_preprocess_preserves_non_pdf_content() -> None:
     assert processed is message
 
 
-@pytest.mark.anyio
 async def test_preprocess_handles_empty_data() -> None:
     """Empty data list is handled gracefully."""
-    from openbb_pydantic_ai.pdf._preprocess import preprocess_pdf_in_result
 
     message = LlmClientFunctionCallResultMessage(
         function="test",
@@ -114,10 +113,8 @@ async def test_preprocess_handles_empty_data() -> None:
     assert processed is message
 
 
-@pytest.mark.anyio
 async def test_preprocess_multiple_results(mocker: MockerFixture) -> None:
     """Multiple result messages are all processed."""
-    from openbb_pydantic_ai.pdf._preprocess import preprocess_pdf_in_results
 
     mocker.patch(
         "openbb_pydantic_ai.pdf._preprocess._extract_pdf_toc",
@@ -136,12 +133,10 @@ async def test_preprocess_multiple_results(mocker: MockerFixture) -> None:
     assert processed[1] is results[1]
 
 
-@pytest.mark.anyio
 async def test_preprocess_converts_pdf_file_reference_to_toc(
     mocker: MockerFixture, pdf_data_format: dict[str, str]
 ) -> None:
     """PDF file references are fetched and converted to TOC text content."""
-    from openbb_pydantic_ai.pdf import _preprocess as pre
 
     message = LlmClientFunctionCallResultMessage(
         function="get_widget_data",
@@ -173,12 +168,10 @@ async def test_preprocess_converts_pdf_file_reference_to_toc(
     assert item.data_format.parse_as == "text"
 
 
-@pytest.mark.anyio
 async def test_preprocess_converts_embedded_pdf_json_and_registers_widget_aliases(
     mocker: MockerFixture,
 ) -> None:
     """PDF metadata embedded in JSON content should still become TOC."""
-    from openbb_pydantic_ai.pdf import _preprocess as pre
 
     widget_id = "file-c0ebd61e-39fa-4382-b82f-4374ea96a30f"
     widget_uuid = "f5638ae4-5b83-49f8-8b02-925cd947646a"

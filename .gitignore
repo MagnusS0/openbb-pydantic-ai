@@ -232,3 +232,6 @@ pyrightconfig.json
 # Ignore all local history of files
 .history
 .ionide
+
+examples/*
+# blog_post.md
