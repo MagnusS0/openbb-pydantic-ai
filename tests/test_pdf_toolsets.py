@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic_ai import ToolReturn
 
-from openbb_pydantic_ai.pdf._store import (
+from openbb_pydantic_ai.pdf._graph import (
     CachedDocument,
     DocumentGraph,
     SectionInfo,
@@ -48,7 +48,7 @@ def test_pdf_query_returns_cache_miss_message(mocker) -> None:
     )
     params = PdfQueryParams(doc_id="missing-doc", action=PdfAction.get_tables)
 
-    result = _pdf_query(None, params)
+    result = _pdf_query(None, params)  # type: ignore[arg-type]
     assert isinstance(result, str)
     assert "not searchable yet" in result
 
@@ -83,7 +83,7 @@ def test_pdf_query_read_pages_emits_tool_return_with_citation(mocker) -> None:
         start_page=2,
         end_page=2,
     )
-    result = _pdf_query(None, params)
+    result = _pdf_query(None, params)  # type: ignore[arg-type]
 
     assert isinstance(result, ToolReturn)
     assert result.return_value == "### Page 2\n\ncontent"
@@ -128,7 +128,7 @@ def test_pdf_query_resolves_alias_doc_id_for_citations(mocker) -> None:
         start_page=1,
         end_page=1,
     )
-    result = _pdf_query(None, params)
+    result = _pdf_query(None, params)  # type: ignore[arg-type]
 
     assert isinstance(result, ToolReturn)
     assert isinstance(result.metadata, dict)
@@ -155,7 +155,7 @@ def test_pdf_query_get_tables_formats_table_listing(mocker) -> None:
     )
 
     params = PdfQueryParams(doc_id="doc-123", action=PdfAction.get_tables)
-    result = _pdf_query(None, params)
+    result = _pdf_query(None, params)  # type: ignore[arg-type]
 
     assert isinstance(result, str)
     assert "[0]" in result
@@ -207,7 +207,7 @@ def test_pdf_query_read_section_by_index(mocker) -> None:
         action=PdfAction.read_section,
         section_index=1,
     )
-    result = _pdf_query(None, params)
+    result = _pdf_query(None, params)  # type: ignore[arg-type]
 
     assert isinstance(result, ToolReturn)
     assert "Methods" in result.return_value

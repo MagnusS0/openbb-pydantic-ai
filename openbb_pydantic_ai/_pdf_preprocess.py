@@ -58,7 +58,7 @@ async def preprocess_pdf_in_messages(messages: list[LlmMessage]) -> list[LlmMess
 
     changed = False
     merged = list(messages)
-    for idx, processed in zip(result_indices, processed_results, strict=False):
+    for idx, processed in zip(result_indices, processed_results, strict=True):
         if merged[idx] is not processed:
             changed = True
         merged[idx] = processed

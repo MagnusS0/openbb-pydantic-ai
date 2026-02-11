@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -66,6 +67,8 @@ from openbb_pydantic_ai._pdf_preprocess import preprocess_pdf_in_results
 from openbb_pydantic_ai._stream_parser import StreamParser
 from openbb_pydantic_ai._utils import format_args, normalize_args
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
+
+logger = logging.getLogger(__name__)
 
 
 def _encode_sse(event: SSE) -> str:
@@ -668,6 +671,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             try:
                 citations_out.append(Citation.model_validate(item))
             except Exception:  # noqa: S112
+                logger.debug("Failed to parse citation from metadata: %s", item)
                 continue
         return citations_out
 

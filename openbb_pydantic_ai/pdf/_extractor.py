@@ -17,16 +17,6 @@ if TYPE_CHECKING:
     from docling.document_converter import DocumentConverter
 
 
-def _collect_provenance(doc: DoclingDocument) -> list[Any]:
-    """Collect all provenance items from a DoclingDocument."""
-    provenance: list[Any] = []
-    for item, _level in doc.iterate_items():
-        prov_list = getattr(item, "prov", None)
-        if prov_list:
-            provenance.extend(prov_list)
-    return provenance
-
-
 @functools.lru_cache(maxsize=4)
 def _get_converter(*, enable_ocr: bool, do_table_structure: bool) -> DocumentConverter:
     """Return a cached ``DocumentConverter`` to avoid reloading models per call."""
@@ -49,10 +39,10 @@ def _extract_sync(
     pdf_path: Path,
     *,
     enable_ocr: bool,
-) -> tuple[str, list[Any], dict[str, Any], DoclingDocument]:
+) -> tuple[str, dict[str, Any], DoclingDocument]:
     """Synchronous PDF extraction using docling.
 
-    Returns (text, provenance_items, metadata, document).
+    Returns (text, metadata, document).
     """
     converter = _get_converter(enable_ocr=enable_ocr, do_table_structure=True)
 
@@ -60,34 +50,75 @@ def _extract_sync(
     doc = result.document
 
     text = doc.export_to_markdown()
-    provenance = _collect_provenance(doc)
 
     metadata: dict[str, Any] = {
         "page_count": doc.num_pages(),
         "filename": pdf_path.name,
     }
 
-    return text, provenance, metadata, doc
+    return text, metadata, doc
 
 
 async def _load_pdf_bytes(
     content: str | None,
     url: str | None,
 ) -> bytes:
-    """Load bytes from base64 content or a remote URL."""
+    """Load bytes from base64 content or a remote URL.
+
+    Caller must ensure exactly one of `content` or `url` is provided.
+    """
     if content is not None:
         return base64.b64decode(content)
 
-    if url is None:
-        msg = "Either 'content' or 'url' must be provided"
-        raise ValueError(msg)
+    # Validate URL scheme
+    from urllib.parse import urlparse
+
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in ("http", "https"):
+        raise ValueError(
+            f"Unsupported URL scheme: {parsed_url.scheme!r}. "
+            "Only http and https are supported."
+        )
 
     import httpx
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        response = await client.get(url)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+        response = await client.get(url)  # type: ignore[arg-type]
         response.raise_for_status()
         return response.content
+
+
+async def _extract_core(
+    content: str | None,
+    url: str | None,
+    *,
+    filename: str,
+    enable_ocr: bool,
+) -> tuple[PdfExtractionResult, DoclingDocument]:
+    """Core extraction logic shared by extract_pdf_content and extract_pdf_document."""
+    if (content is None) == (url is None):
+        msg = "Exactly one of 'content' or 'url' must be provided"
+        raise ValueError(msg)
+
+    pdf_bytes = await _load_pdf_bytes(content, url)
+    doc_id = hashlib.sha256(pdf_bytes).hexdigest()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = Path(tmpdir) / filename
+        pdf_path.write_bytes(pdf_bytes)
+
+        loop = asyncio.get_running_loop()
+        text, metadata, doc = await loop.run_in_executor(
+            None,
+            functools.partial(_extract_sync, pdf_path, enable_ocr=enable_ocr),
+        )
+
+        if url:
+            metadata["url"] = url
+        metadata["doc_id"] = doc_id
+
+    result = PdfExtractionResult(text=text, metadata=metadata)
+    return result, doc
 
 
 async def extract_pdf_content(
@@ -119,39 +150,20 @@ async def extract_pdf_content(
     Returns
     -------
     PdfExtractionResult
-        Extracted text, provenance items, and metadata.
+        Extracted text and metadata.
 
     Raises
     ------
     ValueError
         If both or neither of `content` and `url` are provided.
     """
-    if (content is None) == (url is None):
-        msg = "Exactly one of 'content' or 'url' must be provided"
-        raise ValueError(msg)
-
-    pdf_bytes = await _load_pdf_bytes(content, url)
-    doc_id = hashlib.sha256(pdf_bytes).hexdigest()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pdf_path = Path(tmpdir) / filename
-        pdf_path.write_bytes(pdf_bytes)
-
-        loop = asyncio.get_running_loop()
-        text, provenance, metadata, _doc = await loop.run_in_executor(
-            None,
-            functools.partial(_extract_sync, pdf_path, enable_ocr=enable_ocr),
-        )
-
-        if url:
-            metadata["url"] = url
-        metadata["doc_id"] = doc_id
-
-    return PdfExtractionResult(
-        text=text,
-        provenance=provenance,
-        metadata=metadata,
+    result, _doc = await _extract_core(
+        content,
+        url,
+        filename=filename,
+        enable_ocr=enable_ocr,
     )
+    return result
 
 
 async def extract_pdf_document(
@@ -162,32 +174,9 @@ async def extract_pdf_document(
     enable_ocr: bool = False,
 ) -> tuple[PdfExtractionResult, DoclingDocument]:
     """Extract PDF and return both extraction result and ``DoclingDocument``."""
-    if (content is None) == (url is None):
-        msg = "Exactly one of 'content' or 'url' must be provided"
-        raise ValueError(msg)
-
-    pdf_bytes = await _load_pdf_bytes(content, url)
-    doc_id = hashlib.sha256(pdf_bytes).hexdigest()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pdf_path = Path(tmpdir) / filename
-        pdf_path.write_bytes(pdf_bytes)
-
-        loop = asyncio.get_running_loop()
-        text, provenance, metadata, doc = await loop.run_in_executor(
-            None,
-            functools.partial(_extract_sync, pdf_path, enable_ocr=enable_ocr),
-        )
-
-        if url:
-            metadata["url"] = url
-        metadata["doc_id"] = doc_id
-
-    return (
-        PdfExtractionResult(
-            text=text,
-            provenance=provenance,
-            metadata=metadata,
-        ),
-        doc,
+    return await _extract_core(
+        content,
+        url,
+        filename=filename,
+        enable_ocr=enable_ocr,
     )

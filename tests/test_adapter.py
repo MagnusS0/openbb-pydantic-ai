@@ -64,7 +64,7 @@ async def test_from_request_preprocesses_messages(mocker, make_request) -> None:
             return self._payload
 
     request = _RequestStub(run_input.model_dump_json().encode())
-    adapter = await OpenBBAIAdapter.from_request(request, agent=MagicMock())
+    adapter = await OpenBBAIAdapter.from_request(request, agent=MagicMock())  # type: ignore[arg-type]
 
     preprocess_mock.assert_awaited_once()
     assert adapter._base_messages == [processed_message]

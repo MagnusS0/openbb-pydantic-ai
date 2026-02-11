@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
-
-if TYPE_CHECKING:
-    pass
 
 
 class _LoopStub:
@@ -39,7 +35,7 @@ async def test_extract_pdf_returns_metadata(mocker) -> None:
 
     pdf_bytes = b"fake-pdf-bytes"
     loop = _LoopStub(
-        ("markdown", [], {"page_count": 1, "filename": "document.pdf"}, object())
+        ("markdown", {"page_count": 1, "filename": "document.pdf"}, object())
     )
     mocker.patch.object(
         extractor,
@@ -62,13 +58,11 @@ async def test_extract_pdf_returns_metadata(mocker) -> None:
 
 
 @pytest.mark.anyio
-async def test_extract_pdf_returns_provenance(mocker) -> None:
-    """Provenance list is returned for citation support."""
+async def test_extract_pdf_returns_text(mocker) -> None:
+    """Text is extracted from PDF content."""
     from openbb_pydantic_ai.pdf import _extractor as extractor
 
-    loop = _LoopStub(
-        ("markdown", ["prov"], {"page_count": 1, "filename": "test.pdf"}, object())
-    )
+    loop = _LoopStub(("markdown", {"page_count": 1, "filename": "test.pdf"}, object()))
     mocker.patch.object(
         extractor,
         "_load_pdf_bytes",
@@ -83,7 +77,7 @@ async def test_extract_pdf_returns_provenance(mocker) -> None:
         enable_ocr=False,
     )
 
-    assert isinstance(result.provenance, list)
+    assert result.text == "markdown"
 
 
 @pytest.mark.anyio
@@ -93,7 +87,7 @@ async def test_extract_pdf_document_returns_doc(mocker) -> None:
 
     doc = object()
     pdf_bytes = b"doc-pdf-bytes"
-    loop = _LoopStub(("markdown", [], {"page_count": 2, "filename": "test.pdf"}, doc))
+    loop = _LoopStub(("markdown", {"page_count": 2, "filename": "test.pdf"}, doc))
     mocker.patch.object(
         extractor,
         "_load_pdf_bytes",

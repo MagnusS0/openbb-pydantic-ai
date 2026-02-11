@@ -98,7 +98,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         processed_messages = await preprocess_pdf_in_messages(list(run_input.messages))
         if len(processed_messages) == len(run_input.messages) and all(
             old is new
-            for old, new in zip(run_input.messages, processed_messages, strict=False)
+            for old, new in zip(run_input.messages, processed_messages, strict=True)
         ):
             return run_input
 

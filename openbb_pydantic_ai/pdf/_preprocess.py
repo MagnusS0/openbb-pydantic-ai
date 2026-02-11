@@ -6,7 +6,9 @@ summaries so the LLM can selectively query sections via ``pdf_query``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -24,8 +26,8 @@ from openbb_ai.models import (
 )
 
 from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
+from openbb_pydantic_ai.pdf._graph import build_toc
 from openbb_pydantic_ai.pdf._store import (
-    build_toc,
     get_document,
     get_document_by_source,
     register_document_source,
@@ -231,7 +233,8 @@ def _doc_id_for_source(source: str) -> str | None:
 
     try:
         doc_id = _doc_id_from_base64(source)
-    except Exception:
+    except (ValueError, binascii.Error) as e:
+        logger.warning("Failed to decode base64 content: %s", e)
         return None
 
     return doc_id if get_document(doc_id) is not None else None
@@ -446,16 +449,11 @@ async def preprocess_pdf_in_result(
     if not modified:
         return message
 
-    return LlmClientFunctionCallResultMessage(
-        function=message.function,
-        input_arguments=message.input_arguments,
-        data=new_data,
-        extra_state=message.extra_state,
-    )
+    return message.model_copy(update={"data": new_data})
 
 
 async def preprocess_pdf_in_results(
     results: list[LlmClientFunctionCallResultMessage],
 ) -> list[LlmClientFunctionCallResultMessage]:
     """Pre-process multiple result messages, replacing PDF payloads with TOC."""
-    return [await preprocess_pdf_in_result(r) for r in results]
+    return list(await asyncio.gather(*(preprocess_pdf_in_result(r) for r in results)))

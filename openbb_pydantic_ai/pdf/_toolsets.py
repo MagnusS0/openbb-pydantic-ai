@@ -13,17 +13,17 @@ from pydantic_ai.tools import RunContext
 from openbb_pydantic_ai._config import PDF_QUERY_TOOL_NAME
 from openbb_pydantic_ai._dependencies import OpenBBDeps
 from openbb_pydantic_ai.pdf._citations import extract_citations_from_provenance
-from openbb_pydantic_ai.pdf._store import (
-    CachedDocument,
+from openbb_pydantic_ai.pdf._graph import CachedDocument
+from openbb_pydantic_ai.pdf._query import (
     find_section_node,
-    get_document,
-    get_document_by_source,
     get_section_node_by_index,
     list_tables,
     read_pages_markdown,
     read_section_markdown,
     read_table_markdown,
 )
+from openbb_pydantic_ai.pdf._store import get_document, get_document_by_source
+from openbb_pydantic_ai.pdf._types import ProvenanceItem
 
 _MAX_PAGE_WINDOW = 5
 _MAX_HEADING_SUGGESTIONS = 8
@@ -101,7 +101,7 @@ def _build_citation(
     doc_id: str,
     label: str,
     details: dict[str, Any],
-    provenance_items: list[Any],
+    provenance_items: list[tuple[ProvenanceItem, str]],
 ) -> Citation:
     raw_boxes = extract_citations_from_provenance(provenance_items)
     boxes = [
@@ -232,7 +232,8 @@ def _get_tables(cached: CachedDocument) -> str:
 
 
 def _read_table(cached: CachedDocument, params: PdfQueryParams) -> str | ToolReturn:
-    assert params.table_index is not None
+    if params.table_index is None:
+        raise ValueError("table_index is required for read_table action.")
     table = read_table_markdown(cached, params.table_index)
     if table is None:
         return (
@@ -267,8 +268,8 @@ def _read_table(cached: CachedDocument, params: PdfQueryParams) -> str | ToolRet
 
 def _pdf_query(ctx: RunContext[OpenBBDeps], params: PdfQueryParams) -> str | ToolReturn:
     """
-    Use this tool to retrive content from a uploaded PDF document
-    You first need to call the widget tool with the PDF fil to get the doc_id.
+    Use this tool to retrieve content from an uploaded PDF document
+    You first need to call the widget tool with the PDF file to get the doc_id.
 
     With the doc_id, you can call this tool with different actions:
     - read_section: Retrieve a specific section by heading text or section index.

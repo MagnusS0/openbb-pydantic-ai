@@ -121,14 +121,12 @@ def _build_doc() -> _FakeDoc:
 
 def test_store_builds_toc_from_cached_doc() -> None:
     """Stored document should produce TOC with doc_id and tool hint."""
-    from openbb_pydantic_ai.pdf._store import (
-        DocumentStore,
-        build_toc,
-    )
+    from openbb_pydantic_ai.pdf._graph import build_toc
+    from openbb_pydantic_ai.pdf._store import DocumentStore
 
     store = DocumentStore()
     doc = _build_doc()
-    cached = store.store("doc-1", doc, "test.pdf")
+    cached = store.store("doc-1", doc, "test.pdf")  # type: ignore[arg-type]
     toc = build_toc(cached, "doc-1")
 
     assert "doc_id: doc-1" in toc
@@ -140,16 +138,13 @@ def test_store_builds_toc_from_cached_doc() -> None:
 
 def test_store_resolves_source_alias_and_section_lookup() -> None:
     """Source aliases should resolve and section matching should work."""
-    from openbb_pydantic_ai.pdf._store import (
-        DocumentStore,
-        find_section_node,
-        read_section_markdown,
-    )
+    from openbb_pydantic_ai.pdf._query import find_section_node, read_section_markdown
+    from openbb_pydantic_ai.pdf._store import DocumentStore
 
     store = DocumentStore()
     doc = _build_doc()
     source = "https://example.com/report.pdf"
-    cached = store.store("doc-1", doc, "test.pdf", source=source)
+    cached = store.store("doc-1", doc, "test.pdf", source=source)  # type: ignore[arg-type]
 
     by_source = store.get_by_source(source)
     assert by_source is not None
@@ -169,7 +164,7 @@ def test_register_document_source_alias() -> None:
 
     store = DocumentStore()
     doc = _build_doc()
-    store.store("doc-1", doc, "test.pdf")
+    store.store("doc-1", doc, "test.pdf")  # type: ignore[arg-type]
 
     store.register_source("doc-1", "file-c0ebd61e-39fa-4382-b82f-4374ea96a30f")
 
@@ -187,8 +182,8 @@ def test_store_fifo_eviction() -> None:
 
     store = DocumentStore(max_entries=1)
     doc = _build_doc()
-    store.store("first-doc", doc, "first.pdf")
-    store.store("second-doc", doc, "second.pdf")
+    store.store("first-doc", doc, "first.pdf")  # type: ignore[arg-type]
+    store.store("second-doc", doc, "second.pdf")  # type: ignore[arg-type]
 
     assert store.get("first-doc") is None
     assert store.get("second-doc") is not None

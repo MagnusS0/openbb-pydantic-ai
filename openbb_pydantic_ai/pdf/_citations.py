@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from openbb_pydantic_ai.pdf._types import CitationBoundingBox
+from openbb_pydantic_ai.pdf._types import CitationBoundingBox, ProvenanceItem
 
 
 def extract_citations_from_provenance(
-    provenance_items: list[tuple[Any, str]],
+    provenance_items: list[tuple[ProvenanceItem, str]],
     *,
     max_citations: int = 100,
 ) -> list[CitationBoundingBox]:

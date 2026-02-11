@@ -3,19 +3,54 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
+
+
+class BoundingBox(Protocol):
+    """Docling bounding box with left/top/right/bottom coordinates."""
+
+    l: float  # noqa: E741
+    t: float
+    r: float
+    b: float
+
+
+class ProvenanceItem(Protocol):
+    """Docling provenance item with bbox and page number."""
+
+    bbox: BoundingBox | None
+    page_no: int | None
+
+
+class Caption(Protocol):
+    """Docling caption with text content."""
+
+    text: str | None
+
+
+class DocItem(Protocol):
+    """Docling document item with text and provenance."""
+
+    text: str | None
+    prov: list[ProvenanceItem] | None
+
+
+class TableItem(DocItem, Protocol):
+    """Docling table item with captions and markdown export."""
+
+    captions: list[Caption] | None
+
+    def export_to_markdown(self, *, doc: Any) -> str: ...
 
 
 @dataclass(slots=True)
 class PdfExtractionResult:
     """Result of PDF text extraction.
 
-    Contains the extracted text, provenance items for citations, and metadata.
-    Provenance items are docling's internal type containing bounding box info.
+    Contains the extracted text and metadata.
     """
 
     text: str
-    provenance: list[Any]
     metadata: dict[str, Any]
 
 
