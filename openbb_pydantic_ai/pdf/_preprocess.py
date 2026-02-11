@@ -36,6 +36,22 @@ from openbb_pydantic_ai.pdf._store import (
 
 logger = logging.getLogger(__name__)
 
+# Per-document asyncio locks to prevent duplicate concurrent extractions.
+# Keyed by document identity (source URL or content-hash doc_id).
+_extraction_locks: dict[str, asyncio.Lock] = {}
+_extraction_locks_guard = asyncio.Lock()
+
+
+async def _get_extraction_lock(key: str) -> asyncio.Lock:
+    """Return (or create) an asyncio.Lock for the given document key."""
+    async with _extraction_locks_guard:
+        lock = _extraction_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _extraction_locks[key] = lock
+        return lock
+
+
 # Type alias for data entry union
 DataEntry = Any  # ClientCommandResult | DataContent | DataFileReferences | ...
 PdfLikeItem = SingleDataContent | SingleFileReference
@@ -241,7 +257,11 @@ def _doc_id_for_source(source: str) -> str | None:
 
 
 async def _extract_pdf_toc(content: str, filename: str) -> str | None:
-    """Extract/store PDF and return a compact TOC prompt."""
+    """Extract/store PDF and return a compact TOC prompt.
+
+    Uses per-document asyncio locks so that concurrent coroutines targeting the
+    same document do not redundantly extract it (TOCTOU guard).
+    """
     try:
         from openbb_pydantic_ai.pdf import extract_pdf_document
     except ImportError:
@@ -250,39 +270,44 @@ async def _extract_pdf_toc(content: str, filename: str) -> str | None:
 
     try:
         if _is_url(content):
-            source_hit = get_document_by_source(content)
-            if source_hit is not None:
-                doc_id, cached = source_hit
+            # Determine a stable lock key from the source URL.
+            lock = await _get_extraction_lock(content)
+            async with lock:
+                source_hit = get_document_by_source(content)
+                if source_hit is not None:
+                    doc_id, cached = source_hit
+                    return build_toc(cached, doc_id)
+
+                result, doc = await extract_pdf_document(
+                    url=content,
+                    filename=filename,
+                )
+                doc_id = str(result.metadata.get("doc_id") or "")
+                if not doc_id:
+                    msg = "PDF extraction did not produce doc_id"
+                    raise RuntimeError(msg)
+
+                cached = get_document(doc_id)
+                if cached is None:
+                    cached = store_document(doc_id, doc, filename, source=content)
                 return build_toc(cached, doc_id)
 
+        expected_doc_id = _doc_id_from_base64(content)
+        lock = await _get_extraction_lock(expected_doc_id)
+        async with lock:
+            cached = get_document(expected_doc_id)
+            if cached is not None:
+                return build_toc(cached, expected_doc_id)
+
             result, doc = await extract_pdf_document(
-                url=content,
+                content=content,
                 filename=filename,
             )
-            doc_id = str(result.metadata.get("doc_id") or "")
-            if not doc_id:
-                msg = "PDF extraction did not produce doc_id"
-                raise RuntimeError(msg)
-
+            doc_id = str(result.metadata.get("doc_id") or expected_doc_id)
             cached = get_document(doc_id)
             if cached is None:
-                cached = store_document(doc_id, doc, filename, source=content)
+                cached = store_document(doc_id, doc, filename)
             return build_toc(cached, doc_id)
-
-        expected_doc_id = _doc_id_from_base64(content)
-        cached = get_document(expected_doc_id)
-        if cached is not None:
-            return build_toc(cached, expected_doc_id)
-
-        result, doc = await extract_pdf_document(
-            content=content,
-            filename=filename,
-        )
-        doc_id = str(result.metadata.get("doc_id") or expected_doc_id)
-        cached = get_document(doc_id)
-        if cached is None:
-            cached = store_document(doc_id, doc, filename)
-        return build_toc(cached, doc_id)
     except Exception as e:
         logger.warning("Failed to extract PDF TOC: %s", e)
         return None
