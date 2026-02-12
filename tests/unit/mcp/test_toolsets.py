@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from openbb_ai.models import AgentTool
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
@@ -10,8 +9,6 @@ from pydantic_ai.toolsets import ExternalToolset
 
 from openbb_pydantic_ai._dependencies import OpenBBDeps
 from openbb_pydantic_ai._mcp_toolsets import build_mcp_toolsets
-
-pytestmark = pytest.mark.anyio
 
 
 def _tool(

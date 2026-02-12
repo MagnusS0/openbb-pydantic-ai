@@ -103,6 +103,7 @@ def widget_with_origin(sample_widget: Widget) -> Callable[[str, str], Widget]:
     return _factory
 
 
-@pytest.fixture(scope="session")
-def anyio_backend() -> str:
-    return "asyncio"
+@pytest.fixture
+def pdf_data_format() -> dict[str, str]:
+    """PDF data format dict for constructing PdfDataFormat in tests."""
+    return {"data_type": "pdf", "filename": "test.pdf"}

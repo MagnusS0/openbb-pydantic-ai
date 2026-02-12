@@ -3,26 +3,13 @@ Smoke test: verify that the built package installs and reports the correct versi
 """
 
 import importlib
+import importlib.metadata
 import sys
-from pathlib import Path
-
-import tomllib
-
-
-def read_pyproject_info():
-    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    name = data.get("project", {}).get("name")
-    version = data.get("project", {}).get("version")
-    if not (name and version):
-        raise SystemExit(
-            "Missing [project].name or [project].version in pyproject.toml"
-        )
-    return name, version
 
 
 def main():
-    pkg_name, expected_version = read_pyproject_info()
-    module_name = pkg_name.replace("-", "_")
+    module_name = "openbb_pydantic_ai"
+    dist_name = module_name.replace("_", "-")
 
     print(f"📦 Importing {module_name} ...")
     try:
@@ -39,10 +26,16 @@ def main():
         print("⚠️  No __version__ found in module — expected one.")
         sys.exit(1)
 
-    if str(found_version) != str(expected_version):
+    try:
+        expected_version = importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        print(f"❌ Installed distribution metadata not found for {dist_name}.")
+        sys.exit(1)
+
+    if str(found_version) != expected_version:
         print(
             f"❌ Version mismatch: module reports {found_version}, "
-            f"but pyproject.toml says {expected_version}"
+            f"but installed package metadata says {expected_version}"
         )
         sys.exit(1)
 
