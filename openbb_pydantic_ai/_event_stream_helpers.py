@@ -22,8 +22,11 @@ from openbb_ai.models import (
 from openbb_pydantic_ai._viz_toolsets import _html_artifact
 
 from ._config import EVENT_TYPE_ERROR, GET_WIDGET_DATA_TOOL_NAME
-from ._serializers import parse_json, serialize_result, to_string
-from ._types import SerializedContent, TextStreamCallback
+from ._event_stream_formatters import (
+    _format_discovery_meta_result,
+)
+from ._serializers import parse_json, to_string
+from ._types import TextStreamCallback
 from ._utils import (
     format_arg_value,
     format_args,
@@ -32,7 +35,7 @@ from ._utils import (
 )
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class ToolCallInfo:
     """Metadata captured when a tool call event is received.
 
@@ -52,163 +55,6 @@ class ToolCallInfo:
     args: dict[str, Any]
     widget: Widget | None = None
     agent_tool: AgentTool | None = None
-
-
-def _normalize_tool_description(value: Any) -> str:
-    text = to_string(value) or ""
-    return " ".join(text.split())
-
-
-def _format_discovery_meta_result(
-    tool_name: str, content: Any
-) -> dict[str, str] | None:
-    if tool_name in {"list_tools", "search_tools"} and isinstance(content, Mapping):
-        label = "Matches" if tool_name == "search_tools" else "Tools"
-        count_label = "Match count" if tool_name == "search_tools" else "Tool count"
-        entries = sorted(
-            (str(name), _normalize_tool_description(desc))
-            for name, desc in content.items()
-        )
-        if not entries:
-            return {
-                count_label: "0",
-                label: "(none)",
-            }
-
-        preview_limit = 12
-        lines = [
-            f"{name}: {desc}" if desc else name
-            for name, desc in entries[:preview_limit]
-        ]
-        remaining = len(entries) - preview_limit
-        if remaining > 0:
-            lines.append(f"... and {remaining} more")
-        return {
-            count_label: str(len(entries)),
-            label: "\n".join(lines),
-        }
-
-    if tool_name == "get_tool_schema" and isinstance(content, str):
-        parsed = parse_json(content)
-        if not isinstance(parsed, dict):
-            return None
-
-        multi_tools = parsed.get("tools")
-        if isinstance(multi_tools, list):
-            tool_dicts = [item for item in multi_tools if isinstance(item, Mapping)]
-            details: dict[str, str] = {
-                "Schema count": str(len(tool_dicts)),
-            }
-            names = [
-                str(item.get("name"))
-                for item in tool_dicts
-                if isinstance(item.get("name"), str) and item.get("name")
-            ]
-            if names:
-                preview_limit = 12
-                preview = ", ".join(names[:preview_limit])
-                if len(names) > preview_limit:
-                    preview += ", ..."
-                details["Tools"] = preview
-            return details
-
-        details: dict[str, str] = {}
-        name = parsed.get("name")
-        group = parsed.get("group")
-        description = parsed.get("description")
-        if isinstance(name, str) and name:
-            details["Name"] = name
-        if isinstance(group, str) and group:
-            details["Group"] = group
-        if isinstance(description, str) and description:
-            details["Description"] = _normalize_tool_description(description)
-
-        parameters = parsed.get("parameters")
-        if isinstance(parameters, dict):
-            properties = parameters.get("properties")
-            required = parameters.get("required")
-            property_names = (
-                [str(key) for key in properties.keys()]
-                if isinstance(properties, Mapping)
-                else []
-            )
-            required_count = len(required) if isinstance(required, list) else 0
-            details["Parameter count"] = str(len(property_names))
-            details["Required count"] = str(required_count)
-            if property_names:
-                preview_limit = 12
-                preview = ", ".join(property_names[:preview_limit])
-                if len(property_names) > preview_limit:
-                    preview += ", ..."
-                details["Parameters"] = preview
-
-        return details or None
-
-    if tool_name == "call_tools" and isinstance(content, list):
-        tool_results = [
-            entry
-            for entry in content
-            if isinstance(entry, dict) and "tool_name" in entry
-        ]
-        if not tool_results:
-            return None
-        lines: list[str] = []
-        for entry in tool_results[:12]:
-            name = entry.get("tool_name", "?")
-            result = entry.get("result")
-            result_preview = format_arg_value(result, max_chars=80)
-            lines.append(f"{name}: {result_preview}")
-        remaining = len(tool_results) - 12
-        if remaining > 0:
-            lines.append(f"... and {remaining} more")
-        return {
-            "Result count": str(len(tool_results)),
-            "Results": "\n".join(lines),
-        }
-
-    return None
-
-
-def _format_meta_tool_call_args(
-    tool_name: str, args: dict[str, Any]
-) -> dict[str, str] | None:
-    """Format discovery meta-tool call args for readable reasoning steps."""
-    if tool_name == "call_tools":
-        calls = args.get("calls")
-        if not isinstance(calls, list) or not calls:
-            return None
-        lines: list[str] = []
-        for entry in calls[:12]:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("tool_name", "?")
-            entry_args = entry.get("arguments", {})
-            if isinstance(entry_args, dict) and entry_args:
-                params = ", ".join(
-                    f'{k}="{v}"' if isinstance(v, str) else f"{k}={v}"
-                    for k, v in list(entry_args.items())[:3]
-                )
-                lines.append(f"{name}({params})")
-            else:
-                lines.append(name)
-        remaining = len(calls) - 12
-        if remaining > 0:
-            lines.append(f"... and {remaining} more")
-        return {
-            "Tool count": str(len(calls)),
-            "Tools": "\n".join(lines),
-        }
-
-    if tool_name == "get_tool_schema":
-        tool_names = args.get("tool_names")
-        if isinstance(tool_names, list) and tool_names:
-            names = [str(n) for n in tool_names if isinstance(n, str)][:12]
-            preview = ", ".join(names)
-            if len(tool_names) > 12:
-                preview += ", ..."
-            return {"Tools": preview}
-
-    return None
 
 
 def extract_widget_args(
@@ -234,27 +80,6 @@ def extract_widget_args(
         if data_sources:
             return data_sources[0].get("input_args", {})
     return result_message.input_arguments
-
-
-def serialized_content_from_result(
-    result_message: LlmClientFunctionCallResultMessage,
-) -> SerializedContent:
-    """Serialize a result message into structured content.
-
-    This is a thin wrapper around ContentSerializer.serialize_result() with
-    clearer intent for event stream processing.
-
-    Parameters
-    ----------
-    result_message : LlmClientFunctionCallResultMessage
-        The result message to serialize
-
-    Returns
-    -------
-    SerializedContent
-        Typed dictionary with input_arguments, data, and optional extra_state
-    """
-    return serialize_result(result_message)
 
 
 def handle_generic_tool_result(

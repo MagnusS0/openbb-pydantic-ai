@@ -6,9 +6,9 @@ from typing import Any, cast
 import pytest
 from openbb_ai.models import MessageChunkSSE, StatusUpdateSSE
 
+from openbb_pydantic_ai._event_stream_formatters import _format_meta_tool_call_args
 from openbb_pydantic_ai._event_stream_helpers import (
     ToolCallInfo,
-    _format_meta_tool_call_args,
     handle_generic_tool_result,
     tool_result_events_from_content,
 )
@@ -212,10 +212,12 @@ def test_handle_generic_tool_result_formats_discovery_list_tools() -> None:
 
     events = handle_generic_tool_result(
         info,
-        content={
-            "openbb_create_chart": "Create chart artifacts",
-            "openbb_create_table": "Create table artifacts",
-        },
+        content=(
+            "# openbb_viz_tools\n"
+            "count: 2\n"
+            "- openbb_create_chart: Create chart artifacts\n"
+            "- openbb_create_table: Create table artifacts\n"
+        ),
         mark_streamed_text=lambda: None,
     )
 
@@ -235,7 +237,7 @@ def test_handle_generic_tool_result_formats_discovery_search_empty() -> None:
 
     events = handle_generic_tool_result(
         info,
-        content={},
+        content="No tools found.",
         mark_streamed_text=lambda: None,
     )
 
@@ -252,20 +254,23 @@ def test_handle_generic_tool_result_formats_discovery_search_empty() -> None:
 
 def test_handle_generic_tool_result_formats_discovery_tool_schema() -> None:
     info = ToolCallInfo(tool_name="get_tool_schema", args={"tool_name": "query_db"})
-    schema_payload = json.dumps(
-        {
-            "name": "query_db",
-            "group": "openbb_mcp_tools",
-            "description": "Run a database query",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer"},
+    schema_payload = (
+        "<query_db>\n"
+        + json.dumps(
+            {
+                "group": "openbb_mcp_tools",
+                "description": "Run a database query",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["query"],
                 },
-                "required": ["query"],
-            },
-        }
+            }
+        )
+        + "\n</query_db>"
     )
 
     events = handle_generic_tool_result(
@@ -292,24 +297,27 @@ def test_handle_generic_tool_result_formats_discovery_multi_tool_schema() -> Non
         tool_name="get_tool_schema",
         args={"tool_names": ["query_db", "search_news"]},
     )
-    schema_payload = json.dumps(
-        {
-            "tools": [
+    schema_payload = "\n".join(
+        [
+            "<query_db>",
+            json.dumps(
                 {
-                    "name": "query_db",
                     "group": "openbb_mcp_tools",
                     "description": "Run a database query",
                     "parameters": {"type": "object", "properties": {}},
-                },
+                }
+            ),
+            "</query_db>",
+            "<search_news>",
+            json.dumps(
                 {
-                    "name": "search_news",
                     "group": "openbb_mcp_tools",
                     "description": "Search recent news",
                     "parameters": {"type": "object", "properties": {}},
-                },
-            ],
-            "count": 2,
-        }
+                }
+            ),
+            "</search_news>",
+        ]
     )
 
     events = handle_generic_tool_result(
@@ -444,10 +452,13 @@ def test_format_meta_tool_call_args_get_tool_schema() -> None:
 def test_handle_generic_tool_result_formats_call_tools_results() -> None:
     info = ToolCallInfo(tool_name="call_tools", args={})
 
-    content = [
-        {"tool_name": "openbb_widget_financial_statements", "result": {"rows": 10}},
-        {"tool_name": "openbb_widget_price_chart", "result": "ok"},
-    ]
+    content = (
+        "# Results\n\n"
+        "## openbb_widget_financial_statements\n"
+        '{"rows":10}\n\n'
+        "## openbb_widget_price_chart\n"
+        "ok"
+    )
 
     events = handle_generic_tool_result(
         info,
@@ -471,17 +482,15 @@ def test_handle_generic_tool_result_discovery_no_raw_args_prefix() -> None:
         tool_name="get_tool_schema",
         args={"tool_names": ["openbb_widget_financial_statements"]},
     )
-    schema_payload = json.dumps(
-        {
-            "tools": [
-                {
-                    "name": "openbb_widget_financial_statements",
-                    "description": "Financial statements",
-                    "parameters": {"type": "object", "properties": {}},
-                }
-            ],
-            "count": 1,
-        }
+    schema_payload = (
+        "<openbb_widget_financial_statements>\n"
+        + json.dumps(
+            {
+                "description": "Financial statements",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        )
+        + "\n</openbb_widget_financial_statements>"
     )
 
     events = handle_generic_tool_result(
@@ -496,5 +505,5 @@ def test_handle_generic_tool_result_discovery_no_raw_args_prefix() -> None:
     assert details
     detail_row = details[0]
     # Should have discovery details, not raw args
-    assert "Schema count" in detail_row
+    assert "Name" in detail_row
     assert "tool_names" not in detail_row

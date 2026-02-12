@@ -10,7 +10,7 @@ from openbb_ai.models import AgentTool, Citation, Widget
 from openbb_pydantic_ai._event_stream_helpers import ToolCallInfo
 
 
-@dataclass
+@dataclass(frozen=True)
 class StreamState:
     """Manages state for the event stream."""
 

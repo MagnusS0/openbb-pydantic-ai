@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import html
 import json
+import re
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from pydantic_ai import DeferredToolRequests
-from pydantic_ai.messages import ToolCallPart
+from pydantic import BaseModel, Field
+from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
@@ -18,24 +20,34 @@ if TYPE_CHECKING:
 
 ToolsetSource = AbstractToolset[Any] | tuple[str, AbstractToolset[Any]]
 
+_XML_TAG_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+
+
+class _ToolCallSpec(BaseModel):
+    """Structured schema for a single call_tools entry."""
+
+    tool_name: str = Field(min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
 
 _DEFAULT_INSTRUCTIONS = """\
 You have access to tools via progressive disclosure.
 Use these meta-tools to discover and execute tools on demand:
 
-- `list_tools()` — list all available tool names and short descriptions
-- `search_tools(query)` — filter tools by name/description
+- `list_tools(group=None)` — list tools grouped by source (optional group filter)
+- `search_tools(query, group=None)` — search tools by name/description
+  (optional group filter)
 - `get_tool_schema(tool_names)` — inspect one or more tool schemas
+  (XML-wrapped JSON objects)
 - `call_tools(calls)` — execute one or more tools
 
 Use the workflow: discover -> inspect -> execute.
 Always pass `arguments` as an object/dictionary, never as a JSON string.
+Always pass `calls` as a non-empty list, even for a single tool call.
 
 Correct:
 ```
-call_tools(calls=[
-  {"tool_name": "chart", "arguments": {"symbol": "SILJ"}}
-])
+call_tools(calls=[{"tool_name":"chart","arguments":{"symbol":"SILJ"}}])
 ```
 
 Incorrect:
@@ -53,13 +65,16 @@ call_tools(calls=[
 ])
 ```
 
+You can reduce token usage by filtering tools by group, e.g.:
+`list_tools(group="openbb_viz_tools")`
+
 <available_tool_groups>
 {tool_groups}
 </available_tool_groups>
 """
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class _RegisteredTool:
     """Internal metadata for a discovered tool."""
 
@@ -190,27 +205,33 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         if "list_tools" not in self._exclude_meta_tools:
 
             @self.tool
-            async def list_tools(ctx: RunContext[Any]) -> dict[str, str]:
+            async def list_tools(ctx: RunContext[Any], group: str | None = None) -> str:
                 """List available tools and short descriptions.
 
+                Args:
+                    group: Optional exact group id to filter tools.
+
                 Returns:
-                    Mapping of tool name to one-line description.
+                    Markdown grouped by tool source.
                 """
-                return await self._list_tools_impl(ctx)
+                return await self._list_tools_impl(ctx, group=group)
 
         if "search_tools" not in self._exclude_meta_tools:
 
             @self.tool
-            async def search_tools(ctx: RunContext[Any], query: str) -> dict[str, str]:
+            async def search_tools(
+                ctx: RunContext[Any], query: str, group: str | None = None
+            ) -> str:
                 """Search tools by keyword in name/description.
 
                 Args:
                     query: Case-insensitive keyword to match.
+                    group: Optional exact group id to filter tools.
 
                 Returns:
-                    Mapping of matching tool names to descriptions.
+                    Markdown grouped by tool source.
                 """
-                return await self._search_tools_impl(ctx, query)
+                return await self._search_tools_impl(ctx, query, group=group)
 
         if "get_tool_schema" not in self._exclude_meta_tools:
 
@@ -223,51 +244,130 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
 
                 Args:
                     tool_names: List of exact tool names from `list_tools`.
+
+                Returns:
+                    XML-like blocks where each block wraps a compact JSON object.
                 """
                 return await self._get_tool_schema_impl(ctx, tool_names)
 
         if "call_tools" not in self._exclude_meta_tools:
 
-            @self.tool
+            @self.tool(retries=2)
             async def call_tools(
                 ctx: RunContext[Any],
-                calls: list[dict[str, Any]],
+                calls: Annotated[list[_ToolCallSpec], Field(min_length=1)],
             ) -> Any:
                 """Execute one or more tools.
 
                 Args:
-                    calls: List of tool invocations. Each entry must have
+                    calls: List of invocation objects. Each entry must have
                         `tool_name` (str) and optionally `arguments` (object).
-                        Example: [
+                        Examples:
+                        [
                             {"tool_name": "widget_a", "arguments": {"symbol": "AAPL"}},
                             {"tool_name": "widget_b", "arguments": {"symbol": "MSFT"}}
                         ]
-                """
-                return await self._call_tools_impl(ctx, calls)
 
-    async def _list_tools_impl(self, ctx: RunContext[Any]) -> dict[str, str]:
+                Returns:
+                    Deferred requests (for deferred tools) or a markdown result
+                    summary grouped by tool invocation.
+                """
+                return await self._call_tools_impl(
+                    ctx, [call.model_dump() for call in calls]
+                )
+
+    @staticmethod
+    def _json_compact(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _tool_result_to_text(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped if stripped else "(empty)"
+        try:
+            return ToolDiscoveryToolset._json_compact(value)
+        except TypeError:
+            return str(value)
+
+    @staticmethod
+    def _schema_block(tag_name: str, payload: dict[str, Any]) -> str:
+        payload_text = ToolDiscoveryToolset._json_compact(payload)
+        if _XML_TAG_NAME_RE.match(tag_name):
+            return f"<{tag_name}>\n{payload_text}\n</{tag_name}>"
+        escaped = html.escape(tag_name, quote=True)
+        return f'<tool name="{escaped}">\n{payload_text}\n</tool>'
+
+    def _format_tools_markdown(
+        self,
+        items: list[tuple[str, _RegisteredTool]],
+        *,
+        group: str | None = None,
+    ) -> str:
+        if not items:
+            if group:
+                return f"No tools found for group '{group}'."
+            return "No tools found."
+
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for name, tool in items:
+            grouped.setdefault(tool.source_id, []).append(
+                (name, tool.description[:200])
+            )
+
+        lines: list[str] = []
+        for group_id in sorted(grouped):
+            tools = grouped[group_id]
+            lines.append(f"# {group_id}")
+            lines.append(f"count: {len(tools)}")
+            for tool_name, tool_desc in tools:
+                if tool_desc:
+                    lines.append(f"- {tool_name}: {tool_desc}")
+                else:
+                    lines.append(f"- {tool_name}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    async def _list_tools_impl(
+        self,
+        ctx: RunContext[Any],
+        *,
+        group: str | None = None,
+    ) -> str:
         await self._resolve_pending(ctx)
-        return {
-            name: tool.description[:200]
+        items = [
+            (name, tool)
             for name, tool in sorted(self._registry.items())
-        }
+            if group is None or tool.source_id == group
+        ]
+        return self._format_tools_markdown(items, group=group)
 
     async def _search_tools_impl(
-        self, ctx: RunContext[Any], query: str
-    ) -> dict[str, str]:
+        self,
+        ctx: RunContext[Any],
+        query: str,
+        *,
+        group: str | None = None,
+    ) -> str:
         await self._resolve_pending(ctx)
         q = query.strip().lower()
         if not q:
-            return {}
+            return "No tools found."
         tokens = [token for token in q.replace("_", " ").split() if token]
-        return {
-            name: tool.description[:200]
+        items = [
+            (name, tool)
             for name, tool in sorted(self._registry.items())
             if (
-                q in (haystack := f"{name} {tool.description}".lower())
-                or all(token in haystack for token in tokens)
+                (group is None or tool.source_id == group)
+                and (
+                    q in (haystack := f"{name} {tool.description}".lower())
+                    or all(token in haystack for token in tokens)
+                )
             )
-        }
+        ]
+        return self._format_tools_markdown(items, group=group)
 
     async def _get_tool_schema_impl(
         self,
@@ -292,20 +392,16 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                 f"Some available tools: {available}"
             )
 
-        schemas = [
-            {
-                "name": self._registry[name].name,
-                "description": self._registry[name].description,
-                "group": self._registry[name].source_id,
-                "parameters": self._registry[name].schema,
+        blocks: list[str] = []
+        for name in deduped_names:
+            tool = self._registry[name]
+            payload = {
+                "description": tool.description,
+                "group": tool.source_id,
+                "parameters": tool.schema,
             }
-            for name in deduped_names
-        ]
-
-        return json.dumps(
-            {"tools": schemas, "count": len(schemas)},
-            indent=2,
-        )
+            blocks.append(self._schema_block(tool.name, payload))
+        return "\n".join(blocks)
 
     async def _call_tool_impl(
         self,
@@ -339,18 +435,18 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                         ctx,
                         tool.tool_handle,
                     )
-                except NotImplementedError:
-                    # ExternalToolset from pydantic-ai intentionally raises here.
-                    # Return a deferred request so the normal OpenBB deferred
-                    # execution pipeline can handle it.
-                    deferred = DeferredToolRequests()
-                    deferred.calls.append(
-                        ToolCallPart(
-                            tool_name=resolved_tool_name,
-                            args=args,
-                        )
-                    )
-                    return deferred
+                except NotImplementedError as err:
+                    # ExternalToolset from pydantic-ai intentionally raises
+                    # here.  Raise CallDeferred so the agent graph pauses the
+                    # run (deferred semantics) instead of treating the result
+                    # as a regular tool return which would corrupt message
+                    # history.
+                    raise CallDeferred(
+                        metadata={
+                            "tool_name": resolved_tool_name,
+                            "arguments": args,
+                        }
+                    ) from err
 
             return await tool.source_toolset.call_tool(
                 resolved_tool_name,
@@ -364,50 +460,68 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
     async def _call_tools_impl(
         self,
         ctx: RunContext[Any],
-        calls: list[dict[str, Any]],
+        calls: list[dict[str, Any]] | dict[str, Any],
     ) -> Any:
         """Execute multiple tools and merge deferred requests."""
-        if not calls:
-            raise ValueError("`calls` must be a non-empty list.")
-        for i, entry in enumerate(calls):
+        normalized_calls: list[dict[str, Any]]
+        if isinstance(calls, dict):
+            normalized_calls = [calls]
+        elif isinstance(calls, list):
+            normalized_calls = calls
+        else:
+            raise ValueError("`calls` must be an object or a list of objects.")
+
+        if not normalized_calls:
+            raise ValueError("`calls` must contain at least one call.")
+
+        for i, entry in enumerate(normalized_calls):
             if not isinstance(entry, dict) or "tool_name" not in entry:
                 raise ValueError(f"Entry {i} must be an object with a `tool_name` key.")
 
         results: list[dict[str, Any]] = []
         immediate_tool_names: list[str] = []
         deferred_tool_names: list[str] = []
-        merged_deferred: DeferredToolRequests | None = None
+        deferred_calls: list[dict[str, Any]] = []
 
-        for entry in calls:
+        for entry in normalized_calls:
             tool_name = entry["tool_name"]
             arguments = entry.get("arguments")
-            result = await self._call_tool_impl(ctx, tool_name, arguments)
-
-            if isinstance(result, DeferredToolRequests):
-                if merged_deferred is None:
-                    merged_deferred = DeferredToolRequests()
-                merged_deferred.calls.extend(result.calls)
+            try:
+                result = await self._call_tool_impl(ctx, tool_name, arguments)
+            except CallDeferred as exc:
                 deferred_tool_names.append(tool_name)
+                deferred_calls.append(
+                    exc.metadata or {"tool_name": tool_name, "arguments": arguments}
+                )
             else:
                 results.append({"tool_name": tool_name, "result": result})
                 immediate_tool_names.append(tool_name)
 
-        if merged_deferred is not None and results:
+        if deferred_calls and results:
             deferred_display = ", ".join(sorted(set(deferred_tool_names))[:12])
             immediate_display = ", ".join(sorted(set(immediate_tool_names))[:12])
             raise ValueError(
-                "The `call_tools` batch mixed deferred tools and immediate tools. "
+                "The `call_tools` batch mixed deferred tools "
+                "and immediate tools. "
                 f"Deferred tools: {deferred_display}. "
                 f"Immediate tools: {immediate_display}. "
-                "Split them into separate `call_tools` calls: first run immediate "
-                "tools together, then run deferred tools together."
+                "Split them into separate `call_tools` calls: "
+                "first run immediate tools together, "
+                "then run deferred tools together."
             )
 
-        if merged_deferred is not None:
-            return merged_deferred
-        if len(results) == 1:
-            return results[0]["result"]
-        return results
+        if deferred_calls:
+            # Re-raise CallDeferred so the agent graph pauses the run
+            # with proper deferred semantics.  The metadata carries the
+            # actual tool calls so the adapter can reconstruct them.
+            raise CallDeferred(metadata={"deferred_calls": deferred_calls})
+
+        lines: list[str] = ["# Results"]
+        for entry in results:
+            lines.append("")
+            lines.append(f"## {entry['tool_name']}")
+            lines.append(self._tool_result_to_text(entry["result"]))
+        return "\n".join(lines)
 
     async def get_instructions(self, ctx: RunContext[Any]) -> str | None:
         await self._resolve_pending(ctx)

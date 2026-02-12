@@ -143,10 +143,33 @@ class MessageTransformer:
         pydantic_tool_name = tool_name_map.get(tool_call_id)
         assert pydantic_tool_name is not None
 
+        normalized_args = self._normalize_rewritten_call_args(function_name, args)
+
         # Wrap original args inside call_tools' expected shape
         return _CALL_TOOLS, {
-            "calls": [{"tool_name": pydantic_tool_name, "arguments": args or {}}],
+            "calls": [{"tool_name": pydantic_tool_name, "arguments": normalized_args}],
         }
+
+    @staticmethod
+    def _normalize_rewritten_call_args(
+        function_name: str,
+        args: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Normalize rewritten call args for protocol wrapper functions.
+
+        UI protocol wrappers (like execute_agent_tool) include transport-level
+        fields that do not belong in the underlying tool schema. When rewriting
+        these calls back to `call_tools`, keep only the nested tool arguments.
+        """
+        if not isinstance(args, dict):
+            return {}
+
+        if function_name == EXECUTE_MCP_TOOL_NAME:
+            nested = args.get("parameters")
+            if isinstance(nested, dict):
+                return nested
+
+        return args
 
     def _should_rewrite(
         self,
@@ -249,7 +272,7 @@ class MessageTransformer:
         if isinstance(content, str):
             if message.role == RoleEnum.human:
                 builder.add(UserPromptPart(content=content))
-            elif message.role == RoleEnum.ai:
+            elif message.role in (RoleEnum.ai, RoleEnum.tool):
                 builder.add(TextPart(content=content))
             else:
                 builder.add(TextPart(content=content))

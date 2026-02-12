@@ -5,7 +5,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any, Callable, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from openbb_ai.models import (
@@ -19,6 +20,7 @@ from openbb_ai.models import (
     Widget,
     WidgetCollection,
 )
+from pydantic import ValidationError
 from pydantic_ai.agent import AbstractAgent, AgentMetadata
 from pydantic_ai.agent.abstract import Instructions
 from pydantic_ai.builtin_tools import AbstractBuiltinTool
@@ -51,9 +53,37 @@ if TYPE_CHECKING:
     from starlette.responses import Response
 
 
+@runtime_checkable
+class _HasToolsByName(Protocol):
+    tools_by_name: Mapping[str, AgentTool]
+
+
+@runtime_checkable
+class _HasFuncAttr(Protocol):
+    func: Callable[..., Any]
+
+
+@runtime_checkable
+class _HasFunctionAttr(Protocol):
+    function: Callable[..., Any]
+
+
+@runtime_checkable
+class _HasPrivateFuncAttr(Protocol):
+    _func: Callable[..., Any]
+
+
 @dataclass(kw_only=True)
 class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any]):
     """UI adapter that bridges OpenBB Workspace requests with Pydantic AI."""
+
+    _PROGRESSIVE_CACHE_KEYS = (
+        "_progressive_named_toolsets",
+        "_progressive_group_descriptions",
+        "_progressive_toolset",
+        "instructions",
+        "toolset",
+    )
 
     accept: str | None = None
     enable_progressive_tool_discovery: bool = True
@@ -97,6 +127,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         request: Request,
         *,
         agent: AbstractAgent[OpenBBDeps, Any],
+        enable_progressive_tool_discovery: bool = True,
     ) -> OpenBBAIAdapter:
         """Create adapter and preprocess PDF payloads before message transforms."""
         run_input = cls.build_run_input(await request.body())
@@ -105,6 +136,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             agent=agent,
             run_input=run_input,
             accept=request.headers.get("accept"),
+            enable_progressive_tool_discovery=enable_progressive_tool_discovery,
         )
 
     @classmethod
@@ -198,9 +230,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     def _mcp_tool_lookup(self) -> dict[str, AgentTool]:
         tools: dict[str, AgentTool] = {}
         for toolset in self._mcp_toolsets:
-            mapping = getattr(toolset, "tools_by_name", None)
-            if mapping:
-                tools.update(mapping)
+            if isinstance(toolset, _HasToolsByName):
+                tools.update(toolset.tools_by_name)
         return tools
 
     @cached_property
@@ -265,11 +296,34 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
     @staticmethod
     def _function_tool_callable(tool: Any) -> Any | None:
-        for attr in ("func", "function", "_func"):
-            candidate = getattr(tool, attr, None)
-            if callable(candidate):
-                return candidate
+        if isinstance(tool, _HasFuncAttr) and callable(tool.func):
+            return tool.func
+        if isinstance(tool, _HasFunctionAttr) and callable(tool.function):
+            return tool.function
+        if isinstance(tool, _HasPrivateFuncAttr) and callable(tool._func):
+            return tool._func
         return None
+
+    def _invalidate_progressive_cache(self) -> None:
+        for cache_name in self._PROGRESSIVE_CACHE_KEYS:
+            self.__dict__.pop(cache_name, None)
+
+    def _merge_instructions(
+        self, instructions: Instructions[OpenBBDeps]
+    ) -> Instructions[OpenBBDeps]:
+        combined: Instructions[OpenBBDeps] = self.instructions
+        if instructions:
+            if isinstance(instructions, str):
+                # Avoid duplication if caller already merged context
+                if combined not in instructions:
+                    combined = f"{combined}\n\n{instructions}"
+                else:
+                    combined = instructions
+            elif isinstance(instructions, list):
+                combined = [combined] + instructions
+            else:
+                combined = instructions
+        return combined
 
     def _infer_progressive_config_from_functions(
         self, toolset: AbstractToolset[OpenBBDeps]
@@ -355,15 +409,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         self._runtime_progressive_toolsets = tuple(runtime_named)
         self._runtime_progressive_descriptions = runtime_descriptions
 
-        # Recompute all cached values that include progressive toolset/instructions.
-        for cache_name in (
-            "_progressive_named_toolsets",
-            "_progressive_group_descriptions",
-            "_progressive_toolset",
-            "instructions",
-            "toolset",
-        ):
-            self.__dict__.pop(cache_name, None)
+        # Recompute cached values that include progressive toolset/instructions.
+        self._invalidate_progressive_cache()
 
         return tuple(passthrough) if passthrough else None
 
@@ -583,28 +630,97 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
         builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
+        enable_progressive_tool_discovery: bool = True,
         on_complete: OnCompleteFunc[SSE] | None = None,
     ) -> "Response":
-        """Override UIAdapter.dispatch_request to allow optional deps."""
-        deps_to_forward = cast(OpenBBDeps, deps)
+        """Handle a request and return a streaming response.
 
-        return await super().dispatch_request(
-            request,
-            agent=agent,
-            message_history=message_history,
-            deferred_tool_results=deferred_tool_results,
-            model=model,
-            instructions=instructions,
-            deps=deps_to_forward,
-            output_type=output_type,
-            model_settings=model_settings,
-            usage_limits=usage_limits,
-            usage=usage,
-            metadata=metadata,
-            infer_name=infer_name,
-            toolsets=toolsets,
-            builtin_tools=builtin_tools,
-            on_complete=on_complete,
+        Parameters
+        ----------
+        request : Request
+            Incoming Starlette/FastAPI request.
+        agent : AbstractAgent[OpenBBDeps, Any]
+            Agent to run for this request.
+        message_history : Sequence[ModelMessage] | None, default None
+            Existing model message history.
+        deferred_tool_results : DeferredToolResults | None, default None
+            Deferred tool results for continuation.
+        model : Model | KnownModelName | str | None, default None
+            Optional model override.
+        instructions : Instructions[OpenBBDeps], default None
+            Additional run instructions.
+        deps : OpenBBDeps | None, default None
+            Optional dependency overrides.
+        output_type : OutputSpec[Any] | None, default None
+            Optional output type override.
+        model_settings : ModelSettings | None, default None
+            Optional model settings override.
+        usage_limits : UsageLimits | None, default None
+            Optional token/request limits.
+        usage : RunUsage | None, default None
+            Optional usage accumulator.
+        metadata : AgentMetadata[OpenBBDeps] | None, default None
+            Optional run metadata.
+        infer_name : bool, default True
+            Whether to infer the agent name.
+        toolsets : Sequence[AbstractToolset[OpenBBDeps]] | None, default None
+            Additional runtime toolsets.
+        builtin_tools : Sequence[AbstractBuiltinTool] | None, default None
+            Additional builtin tools.
+        enable_progressive_tool_discovery : bool, default True
+            Whether to enable progressive tool discovery for this request.
+        on_complete : OnCompleteFunc[SSE] | None, default None
+            Optional completion callback.
+
+        Returns
+        -------
+        Response
+            Streaming response for the selected protocol.
+        """
+        try:
+            from starlette.responses import Response
+        except ImportError as e:  # pragma: no cover
+            package_hint = (
+                "Please install the `starlette` package to use "
+                "`dispatch_request()` method, "
+                "you can use the `ui` optional group — "
+                '`pip install "pydantic-ai-slim[ui]"`'
+            )
+            raise ImportError(
+                package_hint,
+            ) from e
+
+        try:
+            adapter = await cls.from_request(
+                request,
+                agent=agent,
+                enable_progressive_tool_discovery=enable_progressive_tool_discovery,
+            )
+        except ValidationError as e:  # pragma: no cover
+            return Response(
+                content=e.json(),
+                media_type="application/json",
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+
+        deps_to_forward = cast(OpenBBDeps, deps)
+        return adapter.streaming_response(
+            adapter.run_stream(
+                message_history=message_history,
+                deferred_tool_results=deferred_tool_results,
+                deps=deps_to_forward,
+                output_type=output_type,
+                model=model,
+                instructions=instructions,
+                model_settings=model_settings,
+                usage_limits=usage_limits,
+                usage=usage,
+                metadata=metadata,
+                infer_name=infer_name,
+                toolsets=toolsets,
+                builtin_tools=builtin_tools,
+                on_complete=on_complete,
+            ),
         )
 
     @override
@@ -631,18 +747,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         """
         resolved_deps: OpenBBDeps = deps or self.deps
         toolsets = self._apply_runtime_progressive_toolsets(toolsets)
-
-        # Merge dynamic dashboard context with caller-provided instructions
-        combined_instructions = self.instructions
-        if instructions:
-            if isinstance(instructions, str):
-                # Avoid duplication if caller already merged context
-                if combined_instructions not in instructions:
-                    combined_instructions = f"{combined_instructions}\n\n{instructions}"
-                else:
-                    combined_instructions = instructions
-            elif isinstance(instructions, list):
-                combined_instructions = [combined_instructions] + instructions
+        combined_instructions = self._merge_instructions(instructions)
 
         return super().run_stream_native(
             output_type=output_type,
@@ -682,18 +787,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
         resolved_deps: OpenBBDeps = deps or self.deps
         toolsets = self._apply_runtime_progressive_toolsets(toolsets)
-
-        # Merge dynamic dashboard context with caller-provided instructions
-        combined_instructions = self.instructions
-        if instructions:
-            if isinstance(instructions, str):
-                # Avoid duplication if caller already merged context
-                if combined_instructions not in instructions:
-                    combined_instructions = f"{combined_instructions}\n\n{instructions}"
-                else:
-                    combined_instructions = instructions
-            elif isinstance(instructions, list):
-                combined_instructions = [combined_instructions] + instructions
+        combined_instructions = self._merge_instructions(instructions)
 
         return super().run_stream(
             output_type=output_type,

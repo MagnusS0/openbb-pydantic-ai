@@ -39,3 +39,36 @@ async def test_from_request_preprocesses_messages(mocker, make_request) -> None:
 
     preprocess_mock.assert_awaited_once()
     assert adapter._base_messages == [processed_message]
+
+
+async def test_dispatch_request_uses_from_request(mocker) -> None:
+    request = MagicMock()
+    agent = MagicMock()
+    stream = object()
+    response = object()
+
+    adapter = MagicMock()
+    adapter.run_stream.return_value = stream
+    adapter.streaming_response.return_value = response
+
+    from_request_mock = mocker.patch.object(
+        OpenBBAIAdapter,
+        "from_request",
+        new_callable=AsyncMock,
+        return_value=adapter,
+    )
+
+    result = await OpenBBAIAdapter.dispatch_request(
+        request,
+        agent=agent,
+        enable_progressive_tool_discovery=False,
+    )
+
+    from_request_mock.assert_awaited_once_with(
+        request,
+        agent=agent,
+        enable_progressive_tool_discovery=False,
+    )
+    adapter.run_stream.assert_called_once()
+    adapter.streaming_response.assert_called_once_with(stream)
+    assert result is response

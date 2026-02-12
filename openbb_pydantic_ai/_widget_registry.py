@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from openbb_ai.models import (
     LlmClientFunctionCallResultMessage,
@@ -18,6 +18,11 @@ if TYPE_CHECKING:
     from pydantic_ai.toolsets import AbstractToolset
 
     from openbb_pydantic_ai._dependencies import OpenBBDeps
+
+
+@runtime_checkable
+class HasWidgetsByTool(Protocol):
+    widgets_by_tool: Mapping[str, Widget]
 
 
 class WidgetRegistry:
@@ -49,9 +54,8 @@ class WidgetRegistry:
         # Build lookup from toolsets
         if toolsets:
             for toolset in toolsets:
-                widgets = getattr(toolset, "widgets_by_tool", None)
-                if widgets:
-                    for tool_name, widget in widgets.items():
+                if isinstance(toolset, HasWidgetsByTool):
+                    for tool_name, widget in toolset.widgets_by_tool.items():
                         _register(widget, tool_name=tool_name)
 
         # Also index from collection if provided
