@@ -414,16 +414,19 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 expanded.append(call)
                 continue
 
-            for entry in nested:
+            for idx, entry in enumerate(nested):
                 if not isinstance(entry, dict):
                     continue
                 tool_name = entry.get("tool_name")
                 if not isinstance(tool_name, str) or not tool_name:
                     continue
+                # Derive a stable tool_call_id from the parent call plus index
+                derived_id = f"{call.tool_call_id}-{idx}"
                 expanded.append(
                     ToolCallPart(
                         tool_name=tool_name,
                         args=entry.get("arguments") or {},
+                        tool_call_id=derived_id,
                     )
                 )
 

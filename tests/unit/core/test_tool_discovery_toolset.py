@@ -336,8 +336,14 @@ async def test_duplicate_tool_names_raise() -> None:
         ]
     )
 
-    with pytest.raises(ValueError, match="Duplicate tool name 'duplicate'"):
+    with pytest.warns(
+        UserWarning, match="Duplicate tool name 'duplicate' in source 'second_group'"
+    ):
         await discovery._resolve_pending(MagicMock())
+
+    # Verify first registration was kept, second was skipped
+    assert "duplicate" in discovery._registry
+    assert discovery._registry["duplicate"].source_id == "first_group"
 
 
 @pytest.mark.parametrize(

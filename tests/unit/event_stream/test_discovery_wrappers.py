@@ -308,3 +308,82 @@ def test_wrapped_chart_call_replaces_placeholder_inline(make_request) -> None:
     assert isinstance(chart_events[0], MessageArtifactSSE)
     assert isinstance(chart_events[1], MessageChunkSSE)
     assert chart_events[1].data.delta == " Outro"
+
+
+def test_expanded_deferred_calls_have_stable_tool_call_ids(
+    widget_collection, make_request
+) -> None:
+    """Verify expanded deferred calls generate stable tool_call_ids.
+
+    When call_tools wraps multiple nested tool calls, _expand_deferred_calls
+    should create ToolCallPart instances with stable tool_call_ids derived
+    from the parent call. This ensures results can be matched and processed
+    correctly.
+    """
+    stream, _widget, tool_name = _build_widget_stream(widget_collection, make_request)
+
+    # Create a deferred call with two nested widget calls
+    deferred = DeferredToolRequests()
+    deferred.calls.append(
+        ToolCallPart(
+            tool_name="call_tools",
+            tool_call_id="call-parent-123",
+            args={
+                "calls": [
+                    {"tool_name": tool_name, "arguments": {"symbol": "AAPL"}},
+                    {"tool_name": tool_name, "arguments": {"symbol": "TSLA"}},
+                ]
+            },
+        )
+    )
+
+    # Process the deferred request
+    events = collect_events(
+        stream.handle_run_result(
+            AgentRunResultEvent(result=AgentRunResult(output=deferred))
+        )
+    )
+
+    # Verify get_widget_data was called
+    function_calls = [e for e in events if e.event == "copilotFunctionCall"]
+    assert len(function_calls) == 1
+
+    # Extract tool_call_ids from the extra_state
+    extra_state = function_calls[0].data.extra_state
+    assert extra_state is not None
+    tool_calls = extra_state.get("tool_calls", [])
+    assert len(tool_calls) == 2
+
+    # Verify tool_call_ids follow the derived pattern
+    assert tool_calls[0]["tool_call_id"] == "call-parent-123-0"
+    assert tool_calls[1]["tool_call_id"] == "call-parent-123-1"
+
+    # Now simulate results coming back with those tool_call_ids
+    # and verify handle_function_tool_result processes them correctly
+    result_event_1 = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name=tool_name,
+            tool_call_id="call-parent-123-0",
+            content={"data": [{"symbol": "AAPL", "price": 150}]},
+        )
+    )
+
+    result_events = collect_events(stream.handle_function_tool_result(result_event_1))
+    # Should emit a status update (not be dropped)
+    assert len(result_events) > 0
+    status_updates = [e for e in result_events if e.event == "copilotStatusUpdate"]
+    assert len(status_updates) > 0
+
+    # Verify second result is also processed
+    result_event_2 = FunctionToolResultEvent(
+        result=ToolReturnPart(
+            tool_name=tool_name,
+            tool_call_id="call-parent-123-1",
+            content={"data": [{"symbol": "TSLA", "price": 200}]},
+        )
+    )
+
+    result_events_2 = collect_events(stream.handle_function_tool_result(result_event_2))
+    assert len(result_events_2) > 0
+    status_updates_2 = [e for e in result_events_2 if e.event == "copilotStatusUpdate"]
+    assert len(status_updates_2) > 0

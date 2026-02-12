@@ -378,6 +378,12 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         if not self.enable_progressive_tool_discovery or not toolsets:
             return toolsets
 
+        # Clear previous runtime state to prevent accumulation across repeated calls
+        self._runtime_progressive_toolsets = ()
+        self._runtime_progressive_descriptions = {}
+        self._invalidate_progressive_cache()
+
+        # Compute used_group_ids from base toolsets only (runtime now cleared)
         used_group_ids = {group_id for group_id, _ in self._progressive_named_toolsets}
         runtime_named: list[tuple[str, AbstractToolset[OpenBBDeps]]] = []
         runtime_descriptions: dict[str, str] = {}

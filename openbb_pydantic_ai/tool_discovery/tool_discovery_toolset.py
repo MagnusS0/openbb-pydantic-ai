@@ -190,16 +190,26 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                     "properties": {},
                     "additionalProperties": True,
                 }
-                self._register_tool(
-                    _RegisteredTool(
-                        name=tool_name,
-                        description=tool_def.description or "",
-                        schema=parameters_schema,
-                        source_id=source_id,
-                        source_toolset=toolset,
-                        tool_handle=tool_handle,
+                try:
+                    self._register_tool(
+                        _RegisteredTool(
+                            name=tool_name,
+                            description=tool_def.description or "",
+                            schema=parameters_schema,
+                            source_id=source_id,
+                            source_toolset=toolset,
+                            tool_handle=tool_handle,
+                        )
                     )
-                )
+                except ValueError:
+                    warnings.warn(
+                        f"Duplicate tool name '{tool_name}' in source "
+                        f"'{source_id}' conflicts with existing registration. "
+                        "Skipping this tool.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    continue
 
     def _register_meta_tools(self) -> None:
         if "list_tools" not in self._exclude_meta_tools:
@@ -403,6 +413,13 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             blocks.append(self._schema_block(tool.name, payload))
         return "\n".join(blocks)
 
+    def _is_deferred_tool(self, tool: _RegisteredTool) -> bool:
+        """Check if a tool will be deferred based on its kind attribute."""
+        if tool.tool_handle is None:
+            return False
+        tool_kind = getattr(tool.tool_handle.tool_def, "kind", None)
+        return tool_kind == "external"
+
     async def _call_tool_impl(
         self,
         ctx: RunContext[Any],
@@ -478,9 +495,42 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             if not isinstance(entry, dict) or "tool_name" not in entry:
                 raise ValueError(f"Entry {i} must be an object with a `tool_name` key.")
 
+        # Pre-classify tools to detect mixed deferred/immediate before execution
+        await self._resolve_pending(ctx)
+        deferred_candidates: list[str] = []
+        immediate_candidates: list[str] = []
+
+        for entry in normalized_calls:
+            tool_name = entry["tool_name"]
+            tool = self._registry.get(tool_name)
+            if tool is None:
+                available = ", ".join(sorted(self._registry)[:20])
+                raise ValueError(
+                    f"Tool '{tool_name}' not found. Some available tools: {available}"
+                )
+
+            if self._is_deferred_tool(tool):
+                deferred_candidates.append(tool_name)
+            else:
+                immediate_candidates.append(tool_name)
+
+        # Detect mixed batch before executing any tools
+        if deferred_candidates and immediate_candidates:
+            deferred_display = ", ".join(sorted(set(deferred_candidates))[:12])
+            immediate_display = ", ".join(sorted(set(immediate_candidates))[:12])
+            raise ValueError(
+                "The `call_tools` batch mixed deferred tools "
+                "and immediate tools. "
+                f"Deferred tools: {deferred_display}. "
+                f"Immediate tools: {immediate_display}. "
+                "Split them into separate `call_tools` calls: "
+                "first run immediate tools together, "
+                "then run deferred tools together. "
+                "Refer to `CallDeferred` for deferred semantics."
+            )
+
+        # Execute tools (all deferred or all immediate at this point)
         results: list[dict[str, Any]] = []
-        immediate_tool_names: list[str] = []
-        deferred_tool_names: list[str] = []
         deferred_calls: list[dict[str, Any]] = []
 
         for entry in normalized_calls:
@@ -489,26 +539,11 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             try:
                 result = await self._call_tool_impl(ctx, tool_name, arguments)
             except CallDeferred as exc:
-                deferred_tool_names.append(tool_name)
                 deferred_calls.append(
                     exc.metadata or {"tool_name": tool_name, "arguments": arguments}
                 )
             else:
                 results.append({"tool_name": tool_name, "result": result})
-                immediate_tool_names.append(tool_name)
-
-        if deferred_calls and results:
-            deferred_display = ", ".join(sorted(set(deferred_tool_names))[:12])
-            immediate_display = ", ".join(sorted(set(immediate_tool_names))[:12])
-            raise ValueError(
-                "The `call_tools` batch mixed deferred tools "
-                "and immediate tools. "
-                f"Deferred tools: {deferred_display}. "
-                f"Immediate tools: {immediate_display}. "
-                "Split them into separate `call_tools` calls: "
-                "first run immediate tools together, "
-                "then run deferred tools together."
-            )
 
         if deferred_calls:
             # Re-raise CallDeferred so the agent graph pauses the run

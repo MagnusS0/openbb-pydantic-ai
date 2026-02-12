@@ -219,6 +219,7 @@ def test_execute_agent_tool_rewrite_uses_inner_parameters(make_request) -> None:
 
     assert len(calls) == 1
     assert calls[0].tool_name == "call_tools"
+    assert isinstance(calls[0].args, dict)
     assert calls[0].args["calls"][0]["tool_name"] == mcp_tool_name
     assert calls[0].args["calls"][0]["arguments"] == wrapped_args["parameters"]
 
