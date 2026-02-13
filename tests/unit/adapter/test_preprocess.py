@@ -68,6 +68,7 @@ async def test_dispatch_request_uses_from_request(mocker) -> None:
         request,
         agent=agent,
         enable_progressive_tool_discovery=False,
+        enable_local_tool_history_capsule=True,
     )
     adapter.run_stream.assert_called_once()
     adapter.streaming_response.assert_called_once_with(stream)

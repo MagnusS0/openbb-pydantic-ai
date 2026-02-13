@@ -53,6 +53,7 @@ from openbb_pydantic_ai._config import (
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
     HTML_TOOL_NAME,
+    LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY,
     PDF_QUERY_TOOL_NAME,
     TABLE_TOOL_NAME,
 )
@@ -66,6 +67,7 @@ from openbb_pydantic_ai._event_stream_helpers import (
     handle_generic_tool_result,
     tool_result_events_from_content,
 )
+from openbb_pydantic_ai._local_tool_capsule import pack_tool_history
 from openbb_pydantic_ai._pdf_preprocess import preprocess_pdf_in_results
 from openbb_pydantic_ai._serializers import serialize_result
 from openbb_pydantic_ai._stream_parser import StreamParser
@@ -90,6 +92,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         default_factory=list
     )
     mcp_tools: Mapping[str, AgentTool] | None = None
+    enable_local_tool_history_capsule: bool = True
 
     # State management components
     _state: StreamState = field(init=False, default_factory=StreamState)
@@ -276,6 +279,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         tool_call_id: str,
         agent_tool: AgentTool,
         args: dict[str, Any],
+        capsule_payload: str | None = None,
     ) -> FunctionCallSSE:
         server_identifier = agent_tool.server_id or agent_tool.url
         input_arguments: dict[str, Any] = {
@@ -298,6 +302,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             ],
             "persist_tool_result": True,
         }
+        if capsule_payload is not None:
+            extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY] = capsule_payload
 
         return FunctionCallSSE(
             data=FunctionCallSSEData(
@@ -440,6 +446,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         widget_requests: list[WidgetRequest] = []
         tool_call_ids: list[dict[str, Any]] = []
         mcp_requests: list[tuple[str, AgentTool, dict[str, Any]]] = []
+        capsule_payload = self._build_local_tool_capsule_payload()
+        capsule_attached = False
 
         expanded_calls = self._expand_deferred_calls(output)
 
@@ -496,7 +504,14 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         if widget_requests:
             sse = get_widget_data(widget_requests)
-            sse.data.extra_state = {"tool_calls": tool_call_ids, "persist_tool_result": True}
+            extra_state: dict[str, Any] = {
+                "tool_calls": tool_call_ids,
+                "persist_tool_result": True,
+            }
+            if capsule_payload is not None:
+                extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY] = capsule_payload
+                capsule_attached = True
+            sse.data.extra_state = extra_state
             yield sse
 
         for tool_call_id, agent_tool, args in mcp_requests:
@@ -504,7 +519,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 tool_call_id=tool_call_id,
                 agent_tool=agent_tool,
                 args=args,
+                capsule_payload=capsule_payload if not capsule_attached else None,
             )
+            capsule_attached = True
 
     def _build_mcp_call_info(
         self, tool_name: str | None, args: dict[str, Any]
@@ -605,6 +622,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             tool_name=effective_tool_name,
             args=effective_args,
         )
+        self._state.register_local_tool_call(
+            tool_call_id=tool_call_id,
+            tool_name=effective_tool_name,
+            args=effective_args,
+        )
 
         meta_details = _format_meta_tool_call_args(effective_tool_name, effective_args)
         if meta_details is not None:
@@ -688,6 +710,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if call_info is None:
             return
 
+        self._state.complete_local_tool_call(tool_call_id, result_part.content)
+
         if call_info.widget is not None:
             citation_details = format_args(call_info.args)
             # Collect citation for later emission (at the end)
@@ -714,6 +738,17 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             mark_streamed_text=self._record_text_streamed,
         ):
             yield sse
+
+    def _build_local_tool_capsule_payload(self) -> str | None:
+        """Build a capsule payload from completed local tool entries."""
+        if not self.enable_local_tool_history_capsule:
+            return None
+
+        entries = self._state.drain_unflushed_local_entries()
+        if not entries:
+            return None
+
+        return pack_tool_history(entries)
 
     async def after_stream(self) -> AsyncIterator[SSE]:
         if self._state.has_thinking():

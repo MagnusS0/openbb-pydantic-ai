@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -12,10 +13,14 @@ from zoneinfo import ZoneInfo
 from openbb_ai.models import (
     SSE,
     AgentTool,
+    ClientCommandResult,
     DashboardInfo,
+    LlmClientFunctionCall,
     LlmClientFunctionCallResultMessage,
+    LlmClientMessage,
     LlmMessage,
     QueryRequest,
+    RoleEnum,
     Undefined,
     Widget,
     WidgetCollection,
@@ -33,8 +38,17 @@ from pydantic_ai.ui import OnCompleteFunc, UIAdapter
 from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import override
 
+from openbb_pydantic_ai._config import (
+    LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY,
+    LOCAL_TOOL_CAPSULE_REHYDRATED_KEY,
+    LOCAL_TOOL_CAPSULE_RESULT_KEY,
+)
 from openbb_pydantic_ai._dependencies import OpenBBDeps, build_deps_from_request
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
+from openbb_pydantic_ai._local_tool_capsule import (
+    LocalToolEntry,
+    unpack_tool_history,
+)
 from openbb_pydantic_ai._mcp_toolsets import build_mcp_toolsets
 from openbb_pydantic_ai._message_transformer import MessageTransformer
 from openbb_pydantic_ai._pdf_preprocess import preprocess_pdf_in_messages
@@ -51,6 +65,8 @@ if TYPE_CHECKING:
     from pydantic_ai import DeferredToolResults
     from starlette.requests import Request
     from starlette.responses import Response
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -87,6 +103,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
     accept: str | None = None
     enable_progressive_tool_discovery: bool = True
+    enable_local_tool_history_capsule: bool = True
 
     # Initialized in __post_init__
     _transformer: MessageTransformer = field(init=False)
@@ -128,16 +145,20 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         *,
         agent: AbstractAgent[OpenBBDeps, Any],
         enable_progressive_tool_discovery: bool = True,
+        enable_local_tool_history_capsule: bool = True,
     ) -> OpenBBAIAdapter:
         """Create adapter and preprocess PDF payloads before message transforms."""
         run_input = cls.build_run_input(await request.body())
         run_input = await cls._preprocess_run_input(run_input)
-        return cls(
+        adapter = cls(
             agent=agent,
             run_input=run_input,
             accept=request.headers.get("accept"),
             enable_progressive_tool_discovery=enable_progressive_tool_discovery,
+            enable_local_tool_history_capsule=enable_local_tool_history_capsule,
         )
+        await adapter._rehydrate_local_capsules()
+        return adapter
 
     @classmethod
     async def _preprocess_run_input(cls, run_input: QueryRequest) -> QueryRequest:
@@ -188,6 +209,134 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             pending.insert(0, message)
 
         return base, pending
+
+    async def _rehydrate_local_capsules(self) -> None:
+        """Inject rehydrated local tool messages from stateless extra_state capsules."""
+        if not self.enable_local_tool_history_capsule:
+            return
+
+        original_messages = list(self.run_input.messages)
+        if not original_messages:
+            return
+
+        rehydrated = await self._messages_with_rehydrated_capsules(original_messages)
+        if len(rehydrated) == len(original_messages):
+            return
+
+        self.run_input = self.run_input.model_copy(update={"messages": rehydrated})
+        self._base_messages, self._pending_results = self._split_messages(rehydrated)
+        self.__dict__.pop("messages", None)
+
+    async def _messages_with_rehydrated_capsules(
+        self,
+        messages: Sequence[LlmMessage],
+    ) -> list[LlmMessage]:
+        rehydrated: list[LlmMessage] = []
+        seen_capsules: set[str] = set()
+        paired_result_indices: set[int] = set()
+
+        for index, message in enumerate(messages):
+            if self._is_function_call_message(message):
+                next_message = (
+                    messages[index + 1] if index + 1 < len(messages) else None
+                )
+                if isinstance(next_message, LlmClientFunctionCallResultMessage):
+                    entries, capsule_key = self._decode_local_capsule(next_message)
+                    if (
+                        entries is not None
+                        and capsule_key is not None
+                        and capsule_key not in seen_capsules
+                    ):
+                        rehydrated.extend(
+                            await self._rehydrated_messages_from_entries(entries)
+                        )
+                        seen_capsules.add(capsule_key)
+                        paired_result_indices.add(index + 1)
+
+                rehydrated.append(message)
+                continue
+
+            if isinstance(message, LlmClientFunctionCallResultMessage):
+                entries, capsule_key = self._decode_local_capsule(message)
+                if (
+                    entries is not None
+                    and capsule_key is not None
+                    and capsule_key not in seen_capsules
+                    and index not in paired_result_indices
+                ):
+                    rehydrated.extend(
+                        await self._rehydrated_messages_from_entries(entries)
+                    )
+                    seen_capsules.add(capsule_key)
+
+            rehydrated.append(message)
+
+        return rehydrated
+
+    @staticmethod
+    def _is_function_call_message(message: LlmMessage) -> bool:
+        return isinstance(message, LlmClientMessage) and isinstance(
+            message.content, LlmClientFunctionCall
+        )
+
+    def _decode_local_capsule(
+        self, message: LlmClientFunctionCallResultMessage
+    ) -> tuple[list[LocalToolEntry] | None, str | None]:
+        extra_state = message.extra_state or {}
+        raw_capsule = extra_state.get(LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY)
+        if raw_capsule is None:
+            return None, None
+
+        if not isinstance(raw_capsule, str):
+            logger.warning(
+                "Ignoring invalid local-tool capsule in message history: "
+                "expected string payload"
+            )
+            return None, None
+
+        try:
+            return unpack_tool_history(raw_capsule), raw_capsule
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Ignoring invalid local-tool capsule in message history: %s",
+                exc,
+            )
+            return None, None
+
+    async def _rehydrated_messages_from_entries(
+        self,
+        entries: Sequence[LocalToolEntry],
+    ) -> list[LlmMessage]:
+        rehydrated_messages: list[LlmMessage] = []
+        for entry in entries:
+            rehydrated_messages.append(
+                LlmClientMessage(
+                    role=RoleEnum.ai,
+                    content=LlmClientFunctionCall(
+                        function=entry.tool_name,
+                        input_arguments=dict(entry.args),
+                    ),
+                )
+            )
+
+            rehydrated_messages.append(
+                LlmClientFunctionCallResultMessage(
+                    function=entry.tool_name,
+                    input_arguments=dict(entry.args),
+                    data=[ClientCommandResult(status="success", message=None)],
+                    extra_state={
+                        LOCAL_TOOL_CAPSULE_REHYDRATED_KEY: True,
+                        LOCAL_TOOL_CAPSULE_RESULT_KEY: entry.result,
+                        "tool_calls": [
+                            {
+                                "tool_call_id": entry.tool_call_id,
+                                "tool_name": entry.tool_name,
+                            }
+                        ],
+                    },
+                )
+            )
+        return rehydrated_messages
 
     @cached_property
     def deps(self) -> OpenBBDeps:
@@ -428,6 +577,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             widget_registry=self._registry,
             pending_results=self._pending_results,
             mcp_tools=self._mcp_tool_lookup or None,
+            enable_local_tool_history_capsule=self.enable_local_tool_history_capsule,
         )
 
     @cached_property
@@ -637,6 +787,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
         builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
         enable_progressive_tool_discovery: bool = True,
+        enable_local_tool_history_capsule: bool = True,
         on_complete: OnCompleteFunc[SSE] | None = None,
     ) -> "Response":
         """Handle a request and return a streaming response.
@@ -675,6 +826,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             Additional builtin tools.
         enable_progressive_tool_discovery : bool, default True
             Whether to enable progressive tool discovery for this request.
+        enable_local_tool_history_capsule : bool, default True
+            Whether to capture and rehydrate local-tool history capsules.
         on_complete : OnCompleteFunc[SSE] | None, default None
             Optional completion callback.
 
@@ -701,6 +854,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 request,
                 agent=agent,
                 enable_progressive_tool_discovery=enable_progressive_tool_discovery,
+                enable_local_tool_history_capsule=enable_local_tool_history_capsule,
             )
         except ValidationError as e:  # pragma: no cover
             return Response(

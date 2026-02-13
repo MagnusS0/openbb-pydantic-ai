@@ -22,7 +22,12 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.ui import MessagesBuilder
 
-from openbb_pydantic_ai._config import EXECUTE_MCP_TOOL_NAME, GET_WIDGET_DATA_TOOL_NAME
+from openbb_pydantic_ai._config import (
+    EXECUTE_MCP_TOOL_NAME,
+    GET_WIDGET_DATA_TOOL_NAME,
+    LOCAL_TOOL_CAPSULE_REHYDRATED_KEY,
+    LOCAL_TOOL_CAPSULE_RESULT_KEY,
+)
 from openbb_pydantic_ai._serializers import serialize_result
 from openbb_pydantic_ai._utils import extract_tool_call_id
 
@@ -310,11 +315,12 @@ class MessageTransformer:
         if self._should_rewrite(result_tool_name, tool_call_id, tool_name_map):
             result_tool_name = _CALL_TOOLS
 
+        result_content = self._result_content(message)
         builder.add(
             ToolReturnPart(
                 tool_name=result_tool_name,
                 tool_call_id=tool_call_id,
-                content=serialize_result(message),
+                content=result_content,
             )
         )
 
@@ -364,3 +370,15 @@ class MessageTransformer:
                     content=result_data,
                 )
             )
+
+    @staticmethod
+    def _result_content(message: LlmClientFunctionCallResultMessage) -> Any:
+        extra_state = message.extra_state or {}
+        if (
+            isinstance(extra_state, dict)
+            and extra_state.get(LOCAL_TOOL_CAPSULE_REHYDRATED_KEY) is True
+            and LOCAL_TOOL_CAPSULE_RESULT_KEY in extra_state
+        ):
+            return extra_state[LOCAL_TOOL_CAPSULE_RESULT_KEY]
+
+        return serialize_result(message)
