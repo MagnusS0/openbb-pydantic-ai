@@ -295,7 +295,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     "tool_name": agent_tool.name,
                     "server_id": server_identifier,
                 }
-            ]
+            ],
+            "persist_tool_result": True,
         }
 
         return FunctionCallSSE(
@@ -495,7 +496,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         if widget_requests:
             sse = get_widget_data(widget_requests)
-            sse.data.extra_state = {"tool_calls": tool_call_ids}
+            sse.data.extra_state = {"tool_calls": tool_call_ids, "persist_tool_result": True}
             yield sse
 
         for tool_call_id, agent_tool, args in mcp_requests:
