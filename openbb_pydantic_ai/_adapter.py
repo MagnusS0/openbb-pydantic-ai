@@ -241,37 +241,37 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                     messages[index + 1] if index + 1 < len(messages) else None
                 )
                 if isinstance(next_message, LlmClientFunctionCallResultMessage):
-                    entries, capsule_key = self._decode_local_capsule(next_message)
-                    if (
-                        entries is not None
-                        and capsule_key is not None
-                        and capsule_key not in seen_capsules
+                    if await self._try_rehydrate_capsule(
+                        next_message, rehydrated, seen_capsules
                     ):
-                        rehydrated.extend(
-                            await self._rehydrated_messages_from_entries(entries)
-                        )
-                        seen_capsules.add(capsule_key)
                         paired_result_indices.add(index + 1)
 
                 rehydrated.append(message)
                 continue
 
-            if isinstance(message, LlmClientFunctionCallResultMessage):
-                entries, capsule_key = self._decode_local_capsule(message)
-                if (
-                    entries is not None
-                    and capsule_key is not None
-                    and capsule_key not in seen_capsules
-                    and index not in paired_result_indices
-                ):
-                    rehydrated.extend(
-                        await self._rehydrated_messages_from_entries(entries)
-                    )
-                    seen_capsules.add(capsule_key)
+            if (
+                isinstance(message, LlmClientFunctionCallResultMessage)
+                and index not in paired_result_indices
+            ):
+                await self._try_rehydrate_capsule(message, rehydrated, seen_capsules)
 
             rehydrated.append(message)
 
         return rehydrated
+
+    async def _try_rehydrate_capsule(
+        self,
+        message: LlmClientFunctionCallResultMessage,
+        target: list[LlmMessage],
+        seen: set[str],
+    ) -> bool:
+        """Decode capsule and append rehydrated messages. Returns True if rehydrated."""
+        entries, capsule_key = self._decode_local_capsule(message)
+        if entries is None or capsule_key is None or capsule_key in seen:
+            return False
+        target.extend(await self._rehydrated_messages_from_entries(entries))
+        seen.add(capsule_key)
+        return True
 
     @staticmethod
     def _is_function_call_message(message: LlmMessage) -> bool:
@@ -307,36 +307,36 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         self,
         entries: Sequence[LocalToolEntry],
     ) -> list[LlmMessage]:
-        rehydrated_messages: list[LlmMessage] = []
+        messages: list[LlmMessage] = []
         for entry in entries:
-            rehydrated_messages.append(
-                LlmClientMessage(
-                    role=RoleEnum.ai,
-                    content=LlmClientFunctionCall(
-                        function=entry.tool_name,
-                        input_arguments=dict(entry.args),
+            args = dict(entry.args)
+            messages.extend(
+                [
+                    LlmClientMessage(
+                        role=RoleEnum.ai,
+                        content=LlmClientFunctionCall(
+                            function=entry.tool_name,
+                            input_arguments=args,
+                        ),
                     ),
-                )
+                    LlmClientFunctionCallResultMessage(
+                        function=entry.tool_name,
+                        input_arguments=args,
+                        data=[ClientCommandResult(status="success", message=None)],
+                        extra_state={
+                            LOCAL_TOOL_CAPSULE_REHYDRATED_KEY: True,
+                            LOCAL_TOOL_CAPSULE_RESULT_KEY: entry.result,
+                            "tool_calls": [
+                                {
+                                    "tool_call_id": entry.tool_call_id,
+                                    "tool_name": entry.tool_name,
+                                }
+                            ],
+                        },
+                    ),
+                ]
             )
-
-            rehydrated_messages.append(
-                LlmClientFunctionCallResultMessage(
-                    function=entry.tool_name,
-                    input_arguments=dict(entry.args),
-                    data=[ClientCommandResult(status="success", message=None)],
-                    extra_state={
-                        LOCAL_TOOL_CAPSULE_REHYDRATED_KEY: True,
-                        LOCAL_TOOL_CAPSULE_RESULT_KEY: entry.result,
-                        "tool_calls": [
-                            {
-                                "tool_call_id": entry.tool_call_id,
-                                "tool_name": entry.tool_name,
-                            }
-                        ],
-                    },
-                )
-            )
-        return rehydrated_messages
+        return messages
 
     @cached_property
     def deps(self) -> OpenBBDeps:
@@ -634,6 +634,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         return "\n".join(lines)
 
+    def _widget_line(self, name: str, widget: Widget) -> str:
+        """Format a single widget as a prompt line item."""
+        params_str = self._format_widget_params(widget)
+        return f"- {name}: {params_str}" if params_str else f"- {name}"
+
     def _dashboard_context_lines(self, dashboard: DashboardInfo) -> list[str]:
         """Build prompt lines for dashboard info and widget values."""
         lines = ["<dashboard_info>"]
@@ -656,29 +661,22 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                     widget = self.deps.get_widget_by_uuid(widget_ref.widget_uuid)
                     if widget:
                         processed_uuids.add(str(widget.uuid))
-                        params_str = self._format_widget_params(widget)
                         name = widget_ref.name or widget.name or widget.widget_id
-                        if params_str:
-                            lines.append(f"- {name}: {params_str}")
-                        else:
-                            lines.append(f"- {name}")
+                        lines.append(self._widget_line(name, widget))
                     else:
                         lines.append(f"- {widget_ref.name}")
                 lines.append("")
 
         # Handle widgets not in dashboard
-        all_widgets = list(self.deps.iter_widgets())
-        orphan_widgets = [w for w in all_widgets if str(w.uuid) not in processed_uuids]
+        orphan_widgets = [
+            w for w in self.deps.iter_widgets() if str(w.uuid) not in processed_uuids
+        ]
 
         if orphan_widgets:
             lines.append("Other Available Widgets:")
             for widget in orphan_widgets:
-                params_str = self._format_widget_params(widget)
                 name = widget.name or widget.widget_id
-                if params_str:
-                    lines.append(f"- {name}: {params_str}")
-                else:
-                    lines.append(f"- {name}")
+                lines.append(self._widget_line(name, widget))
 
         lines.append("</dashboard_info>")
         return lines
@@ -688,16 +686,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         if not self.deps.widgets:
             return []
 
-        widgets_iter = self.deps.iter_widgets()
-
-        lines: list[str] = []
-        for widget in widgets_iter:
-            params_str = self._format_widget_params(widget)
-            if params_str:
-                widget_name = widget.name or widget.widget_id
-                lines.append(f"- {widget_name}: {params_str}")
-
-        return lines
+        return [
+            self._widget_line(w.name or w.widget_id, w)
+            for w in self.deps.iter_widgets()
+            if self._format_widget_params(w)
+        ]
 
     def _format_widget_params(self, widget: Widget) -> str | None:
         """Format widget parameters into a string."""

@@ -279,12 +279,12 @@ def _pdf_query(ctx: RunContext[OpenBBDeps], params: PdfQueryParams) -> str | Too
     """
     del ctx
 
-    resolved_doc_id = params.doc_id
-    cached = get_document(resolved_doc_id)
+    doc_id = params.doc_id
+    cached = get_document(doc_id)
     if cached is None:
-        by_source = get_document_by_source(params.doc_id)
+        by_source = get_document_by_source(doc_id)
         if by_source is not None:
-            resolved_doc_id, cached = by_source
+            doc_id, cached = by_source
 
     if cached is None:
         return (
@@ -293,20 +293,19 @@ def _pdf_query(ctx: RunContext[OpenBBDeps], params: PdfQueryParams) -> str | Too
             "`pdf_query` with the doc_id from the TOC message."
         )
 
-    resolved_params = params
-    if resolved_doc_id != params.doc_id:
-        resolved_params = params.model_copy(update={"doc_id": resolved_doc_id})
+    if doc_id != params.doc_id:
+        params = params.model_copy(update={"doc_id": doc_id})
 
-    if resolved_params.action == PdfAction.read_section:
-        return _read_section(cached, resolved_params)
-    if resolved_params.action == PdfAction.read_pages:
-        return _read_pages(cached, resolved_params)
-    if resolved_params.action == PdfAction.get_tables:
+    if params.action == PdfAction.read_section:
+        return _read_section(cached, params)
+    if params.action == PdfAction.read_pages:
+        return _read_pages(cached, params)
+    if params.action == PdfAction.get_tables:
         return _get_tables(cached)
-    if resolved_params.action == PdfAction.read_table:
-        return _read_table(cached, resolved_params)
+    if params.action == PdfAction.read_table:
+        return _read_table(cached, params)
 
-    return f"Unsupported action: {resolved_params.action}"
+    return f"Unsupported action: {params.action}"
 
 
 def build_pdf_toolset() -> FunctionToolset[OpenBBDeps]:

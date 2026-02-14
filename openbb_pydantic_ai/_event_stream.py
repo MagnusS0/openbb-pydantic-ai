@@ -145,7 +145,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 citation = cite(
                     widget,
                     widget_args,
-                    extra_details=citation_details if citation_details else None,
+                    extra_details=citation_details or None,
                 )
                 enriched = self._enrich_citation(widget, citation)
                 self._state.add_citation(enriched)
@@ -153,13 +153,10 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
             details = format_args(widget_args)
             suffix = f" #{idx}" if len(widget_entries) > 1 else ""
-            message = (
-                f"Received result{suffix} for '{result_message.function}' "
-                "without widget metadata"
-            )
             yield reasoning_step(
-                message,
-                details=details if details else None,
+                f"Received result{suffix} for '{result_message.function}' "
+                "without widget metadata",
+                details=details or None,
                 event_type=EVENT_TYPE_WARNING,
             )
 
@@ -169,17 +166,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield reasoning_step(f"PDF — {text_label} returned")
             return
 
-        primary_widget: Widget | None = None
-        primary_args: dict[str, Any] = {}
-        if widget_entries:
-            primary_widget = widget_entries[0][0]
-            primary_args = widget_entries[0][1]
-
-        call_args = primary_args if len(widget_entries) == 1 else {}
+        is_single = len(widget_entries) == 1
         call_info = ToolCallInfo(
             tool_name=result_message.function,
-            args=call_args,
-            widget=primary_widget if len(widget_entries) == 1 else None,
+            args=widget_entries[0][1] if is_single else {},
+            widget=widget_entries[0][0] if is_single else None,
         )
 
         for event in self._widget_result_events(
@@ -523,18 +514,6 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             )
             capsule_attached = True
 
-    def _build_mcp_call_info(
-        self, tool_name: str | None, args: dict[str, Any]
-    ) -> ToolCallInfo:
-        agent_tool = (
-            self._find_agent_tool(tool_name) if tool_name and self.mcp_tools else None
-        )
-        return ToolCallInfo(
-            tool_name=tool_name or EXECUTE_MCP_TOOL_NAME,
-            args=args,
-            agent_tool=agent_tool,
-        )
-
     @staticmethod
     def _extract_effective_tool_call(
         tool_name: str, args: dict[str, Any]
@@ -628,12 +607,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             args=effective_args,
         )
 
-        meta_details = _format_meta_tool_call_args(effective_tool_name, effective_args)
-        if meta_details is not None:
-            details: dict[str, Any] | None = meta_details
-        else:
-            formatted_args = format_args(effective_args)
-            details = formatted_args if formatted_args else None
+        details: dict[str, Any] | None = (
+            _format_meta_tool_call_args(effective_tool_name, effective_args)
+            or format_args(effective_args)
+            or None
+        )
         yield reasoning_step(f"Calling tool '{effective_tool_name}'", details=details)
 
     async def handle_function_tool_result(
@@ -718,7 +696,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             citation = cite(
                 call_info.widget,
                 call_info.args,
-                extra_details=citation_details if citation_details else None,
+                extra_details=citation_details or None,
             )
             enriched = self._enrich_citation(call_info.widget, citation)
             self._state.add_citation(enriched)
@@ -771,8 +749,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             self._state.clear_citations()
 
         if self._final_output and not self._has_streamed_text:
-            events = self._text_events_with_artifacts(self._final_output)
-            for event in events:
+            for event in self._text_events_with_artifacts(self._final_output):
                 yield event
 
     def _widget_result_events(

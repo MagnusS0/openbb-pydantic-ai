@@ -26,12 +26,12 @@ def serialize_result(
         A typed dictionary containing input_arguments, data, and
         optionally extra_state
     """
-    data: list[Any] = []
-    for item in message.data:
-        if hasattr(item, "model_dump"):
-            data.append(item.model_dump(mode="json", exclude_none=True))
-        else:
-            data.append(item)
+    data: list[Any] = [
+        item.model_dump(mode="json", exclude_none=True)
+        if hasattr(item, "model_dump")
+        else item
+        for item in message.data
+    ]
 
     content: SerializedContent = cast(
         SerializedContent,

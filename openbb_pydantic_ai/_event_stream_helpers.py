@@ -153,14 +153,9 @@ def handle_generic_tool_result(
             artifact,
         ]
 
-    details: dict[str, Any] | None = None
-    if info.args:
-        formatted = format_args(info.args)
-        if formatted:
-            details = formatted.copy()
+    details: dict[str, Any] | None = format_args(info.args) or None
 
-    result_text = to_string(content)
-    if result_text:
+    if to_string(content):
         details = details or {}
         details["Result"] = format_arg_value(content)
 
@@ -448,16 +443,10 @@ def _extract_error_messages(value: Any) -> list[str] | None:
 
 def _dict_items_to_rows(data: Mapping[str, Any]) -> list[dict[str, str]]:
     """Convert a mapping into key/value rows for table rendering."""
-
-    rows: list[dict[str, str]] = []
-    for key, value in data.items():
-        rows.append(
-            {
-                "Field": str(key),
-                "Value": format_arg_value(value),
-            }
-        )
-    return rows
+    return [
+        {"Field": str(key), "Value": format_arg_value(value)}
+        for key, value in data.items()
+    ]
 
 
 def _try_expand_mapping(
@@ -467,16 +456,9 @@ def _try_expand_mapping(
 ) -> list[ClientArtifact] | None:
     """Attempt to expand a dictionary into multiple table artifacts."""
 
-    should_expand = False
-    for value in data.values():
-        if _extract_table_rows(value) is not None:
-            should_expand = True
-            break
-        if isinstance(value, dict):
-            should_expand = True
-            break
-
-    if not should_expand:
+    if not any(
+        _extract_table_rows(v) is not None or isinstance(v, dict) for v in data.values()
+    ):
         return None
 
     artifacts: list[ClientArtifact] = []
@@ -526,20 +508,13 @@ def _resolve_widget_name(
 ) -> str | None:
     """Resolve the name for a data item."""
     name = item.get("name")
-
     if name:
         return name
 
-    resolved_widget = None
-    if default_widget:
-        resolved_widget = default_widget
-    elif widget_entries and idx < len(widget_entries):
-        resolved_widget = widget_entries[idx][0]
-
-    if resolved_widget:
-        return resolved_widget.name
-
-    return None
+    widget = default_widget or (
+        widget_entries[idx][0] if widget_entries and idx < len(widget_entries) else None
+    )
+    return widget.name if widget else None
 
 
 def _parse_item_content(
@@ -636,38 +611,25 @@ def _widget_for_item_index(
     widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None,
     default_widget: Widget | None,
 ) -> Widget | None:
-    if default_widget is not None:
-        return default_widget
-
-    if widget_entries and idx < len(widget_entries):
-        return widget_entries[idx][0]
-
-    return None
+    return default_widget or (
+        widget_entries[idx][0] if widget_entries and idx < len(widget_entries) else None
+    )
 
 
 def _build_html_widget_ids(
     widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None,
     default_widget: Widget | None,
 ) -> set[str]:
-    html_widget_ids: set[str] = set()
-
-    if widget_entries:
-        for widget, _ in widget_entries:
-            if (
-                widget is not None
-                and isinstance(widget.widget_id, str)
-                and widget.widget_id.startswith("html-")
-            ):
-                html_widget_ids.add(widget.widget_id)
-
-    if (
-        default_widget is not None
-        and isinstance(default_widget.widget_id, str)
-        and default_widget.widget_id.startswith("html-")
-    ):
-        html_widget_ids.add(default_widget.widget_id)
-
-    return html_widget_ids
+    candidates = [w for w, _ in widget_entries] if widget_entries else []
+    if default_widget is not None:
+        candidates.append(default_widget)
+    return {
+        w.widget_id
+        for w in candidates
+        if w is not None
+        and isinstance(w.widget_id, str)
+        and w.widget_id.startswith("html-")
+    }
 
 
 def _data_type_warning_event(data_type: str | None) -> SSE | None:

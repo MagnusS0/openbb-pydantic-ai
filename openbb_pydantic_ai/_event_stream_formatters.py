@@ -100,11 +100,7 @@ def _add_parameter_details(details: dict[str, str], payload: Mapping[str, Any]) 
 
     properties = parameters.get("properties")
     required = parameters.get("required")
-    property_names = (
-        [str(key) for key in properties.keys()]
-        if isinstance(properties, Mapping)
-        else []
-    )
+    property_names = list(properties) if isinstance(properties, Mapping) else []
     required_count = len(required) if isinstance(required, list) else 0
     details["Parameter count"] = str(len(property_names))
     details["Required count"] = str(required_count)
