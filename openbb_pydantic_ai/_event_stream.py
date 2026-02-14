@@ -336,8 +336,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         self._state.clear_thinking()
         if part.content:
             self._state.add_thinking(part.content)
-        return
-        yield reasoning_step("")  # pragma: no cover
+        if False:  # pragma: no cover
+            yield reasoning_step("")
 
     async def handle_thinking_delta(
         self,
@@ -345,8 +345,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     ) -> AsyncIterator[SSE]:
         if delta.content_delta:
             self._state.add_thinking(delta.content_delta)
-        return
-        yield reasoning_step("")  # pragma: no cover
+        if False:  # pragma: no cover
+            yield reasoning_step("")
 
     async def handle_thinking_end(
         self,

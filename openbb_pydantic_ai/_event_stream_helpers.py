@@ -21,7 +21,12 @@ from openbb_ai.models import (
 
 from openbb_pydantic_ai._viz_toolsets import _html_artifact
 
-from ._config import EVENT_TYPE_ERROR, GET_WIDGET_DATA_TOOL_NAME
+from ._config import (
+    EVENT_TYPE_ERROR,
+    GET_WIDGET_DATA_TOOL_NAME,
+    MAX_NESTED_JSON_DECODE_DEPTH,
+    MAX_TABLE_PARSE_DEPTH,
+)
 from ._event_stream_formatters import (
     _format_discovery_meta_result,
 )
@@ -30,6 +35,7 @@ from ._types import TextStreamCallback
 from ._utils import (
     format_arg_value,
     format_args,
+    get_first_data_source,
     get_str,
     get_str_list,
 )
@@ -76,9 +82,15 @@ def extract_widget_args(
         The widget invocation arguments
     """
     if result_message.function == GET_WIDGET_DATA_TOOL_NAME:
-        data_sources = result_message.input_arguments.get("data_sources", [])
-        if data_sources:
-            return data_sources[0].get("input_args", {})
+        first_data_source = get_first_data_source(result_message.input_arguments)
+        if first_data_source is None:
+            return {}
+
+        input_args = first_data_source.get("input_args")
+        if isinstance(input_args, Mapping):
+            return dict(input_args)
+        return {}
+
     return result_message.input_arguments
 
 
@@ -619,6 +631,133 @@ def _item_to_artifact(
     return [], None
 
 
+def _widget_for_item_index(
+    idx: int,
+    widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None,
+    default_widget: Widget | None,
+) -> Widget | None:
+    if default_widget is not None:
+        return default_widget
+
+    if widget_entries and idx < len(widget_entries):
+        return widget_entries[idx][0]
+
+    return None
+
+
+def _build_html_widget_ids(
+    widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None,
+    default_widget: Widget | None,
+) -> set[str]:
+    html_widget_ids: set[str] = set()
+
+    if widget_entries:
+        for widget, _ in widget_entries:
+            if (
+                widget is not None
+                and isinstance(widget.widget_id, str)
+                and widget.widget_id.startswith("html-")
+            ):
+                html_widget_ids.add(widget.widget_id)
+
+    if (
+        default_widget is not None
+        and isinstance(default_widget.widget_id, str)
+        and default_widget.widget_id.startswith("html-")
+    ):
+        html_widget_ids.add(default_widget.widget_id)
+
+    return html_widget_ids
+
+
+def _data_type_warning_event(data_type: str | None) -> SSE | None:
+    if data_type == "pdf":
+        return reasoning_step(
+            "PDF content received but could not be extracted. "
+            'Install PDF support: pip install "openbb-pydantic-ai[pdf]"',
+            event_type="WARNING",
+        )
+
+    if data_type and data_type not in ("object", "json"):
+        return reasoning_step(
+            f"Format '{data_type}' not implemented",
+            event_type="WARNING",
+        )
+
+    return None
+
+
+def _process_single_data_item(
+    item: dict[str, Any],
+    idx: int,
+    *,
+    mark_streamed_text: TextStreamCallback,
+    widget_entries: list[tuple[Widget | None, dict[str, Any]]] | None,
+    default_widget: Widget | None,
+    html_widget_ids: set[str],
+) -> tuple[list[ClientArtifact], list[SSE]]:
+    raw_content = item.get("content")
+    if not isinstance(raw_content, str):
+        return [], []
+
+    name = _resolve_widget_name(item, widget_entries, default_widget, idx)
+    display_name = name or "unknown"
+
+    data_format = item.get("data_format")
+    parse_as: str | None = None
+    data_type: str | None = None
+    if isinstance(data_format, Mapping):
+        parse_as_value = data_format.get("parse_as")
+        data_type_value = data_format.get("data_type")
+        if isinstance(parse_as_value, str):
+            parse_as = parse_as_value
+        if isinstance(data_type_value, str):
+            data_type = data_type_value
+
+    if parse_as == "text":
+        mark_streamed_text()
+        return [], [message_chunk(raw_content)]
+
+    widget_for_item = _widget_for_item_index(idx, widget_entries, default_widget)
+    is_html_widget = bool(
+        widget_for_item is not None
+        and isinstance(widget_for_item.widget_id, str)
+        and widget_for_item.widget_id in html_widget_ids
+    )
+    if data_type == "html" or is_html_widget:
+        html_content = _html_content_from_raw(raw_content) or raw_content
+        return [
+            ClientArtifact(
+                type="html",
+                name=name or "HTML Content",
+                description=item.get("description") or "HTML artifact",
+                content=html_content,
+            )
+        ], []
+
+    warning_event = _data_type_warning_event(data_type)
+    if warning_event is not None:
+        return [], [warning_event]
+
+    parsed, error_event = _parse_item_content(raw_content, display_name)
+    if error_event is not None:
+        return [], [error_event]
+
+    new_artifacts, artifact_error = _item_to_artifact(
+        parsed,
+        name,
+        item.get("description"),
+    )
+    if artifact_error is not None:
+        return [], [artifact_error]
+
+    if new_artifacts:
+        return new_artifacts, []
+
+    mark_streamed_text()
+    return [], [message_chunk(raw_content)]
+
+
 def _process_data_items(
     entry: dict[str, Any],
     mark_streamed_text: TextStreamCallback,
@@ -653,102 +792,37 @@ def _process_data_items(
 
     artifacts: list[ClientArtifact] = []
     events: list[SSE] = []
-
-    html_widget_ids: set[str] = set()
-    if widget_entries:
-        for widget, _ in widget_entries:
-            if widget and isinstance(widget.widget_id, str):
-                if widget.widget_id.startswith("html-"):
-                    html_widget_ids.add(widget.widget_id)
-    if default_widget and isinstance(default_widget.widget_id, str):
-        if default_widget.widget_id.startswith("html-"):
-            html_widget_ids.add(default_widget.widget_id)
+    html_widget_ids = _build_html_widget_ids(widget_entries, default_widget)
 
     for idx, item in enumerate(items):
         if not isinstance(item, dict):
             continue
 
-        raw_content = item.get("content")
-        if not isinstance(raw_content, str):
-            continue
-
-        name = _resolve_widget_name(item, widget_entries, default_widget, idx)
-        display_name = name or "unknown"
-
-        data_format = item.get("data_format", {})
-        parse_as = data_format.get("parse_as")
-        data_type = data_format.get("data_type")
-
-        if parse_as == "text":
-            mark_streamed_text()
-            events.append(message_chunk(raw_content))
-            continue
-
-        widget_for_item = default_widget
-        if not widget_for_item and widget_entries and idx < len(widget_entries):
-            widget_for_item = widget_entries[idx][0]
-
-        is_html_widget = bool(
-            widget_for_item
-            and isinstance(widget_for_item.widget_id, str)
-            and widget_for_item.widget_id in html_widget_ids
+        item_artifacts, item_events = _process_single_data_item(
+            item,
+            idx,
+            mark_streamed_text=mark_streamed_text,
+            widget_entries=widget_entries,
+            default_widget=default_widget,
+            html_widget_ids=html_widget_ids,
         )
-        if data_type == "html" or is_html_widget:
-            html_content = _html_content_from_raw(raw_content) or raw_content
-            artifacts.append(
-                ClientArtifact(
-                    type="html",
-                    name=name or "HTML Content",
-                    description=item.get("description") or "HTML artifact",
-                    content=html_content,
-                )
-            )
-            continue
-
-        if data_type == "pdf":
-            events.append(
-                reasoning_step(
-                    "PDF content received but could not be extracted. "
-                    'Install PDF support: pip install "openbb-pydantic-ai[pdf]"',
-                    event_type="WARNING",
-                )
-            )
-            continue
-
-        if data_type and data_type not in ("object", "json"):
-            events.append(
-                reasoning_step(
-                    f"Format '{data_type}' not implemented", event_type="WARNING"
-                )
-            )
-            continue
-
-        parsed, error_event = _parse_item_content(raw_content, display_name)
-        if error_event:
-            events.append(error_event)
-            continue
-
-        new_artifacts, error_event = _item_to_artifact(
-            parsed,
-            name,
-            item.get("description"),
-        )
-
-        if error_event:
-            events.append(error_event)
-            continue
-
-        if new_artifacts:
-            artifacts.extend(new_artifacts)
-        else:
-            mark_streamed_text()
-            events.append(message_chunk(raw_content))
+        if item_artifacts:
+            artifacts.extend(item_artifacts)
+        if item_events:
+            events.extend(item_events)
 
     return artifacts, events
 
 
-def _extract_table_rows(value: Any) -> list[dict[str, Any]] | None:
+def _extract_table_rows(
+    value: Any,
+    *,
+    remaining_depth: int = MAX_TABLE_PARSE_DEPTH,
+) -> list[dict[str, Any]] | None:
     """Try to coerce nested JSON structures into table rows."""
+
+    if remaining_depth <= 0:
+        return None
 
     if isinstance(value, list) and value:
         if all(isinstance(row, dict) for row in value):
@@ -776,12 +850,16 @@ def _extract_table_rows(value: Any) -> list[dict[str, Any]] | None:
         parsed = _decode_nested_json(parse_json(value))
         if parsed == value:
             return None
-        return _extract_table_rows(parsed)
+        return _extract_table_rows(parsed, remaining_depth=remaining_depth - 1)
 
     return None
 
 
-def _decode_nested_json(value: Any, *, max_depth: int = 3) -> Any:
+def _decode_nested_json(
+    value: Any,
+    *,
+    max_depth: int = MAX_NESTED_JSON_DECODE_DEPTH,
+) -> Any:
     """Recursively parse JSON strings to handle double-encoded payloads."""
 
     depth = 0

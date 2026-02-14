@@ -883,6 +883,23 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             ),
         )
 
+    def _resolve_stream_defaults(
+        self,
+        *,
+        deps: OpenBBDeps | None,
+        toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None,
+        instructions: Instructions[OpenBBDeps],
+    ) -> tuple[
+        OpenBBDeps,
+        Sequence[AbstractToolset[OpenBBDeps]] | None,
+        Instructions[OpenBBDeps],
+    ]:
+        """Resolve defaults shared by stream entrypoints."""
+        resolved_deps: OpenBBDeps = deps or self.deps
+        resolved_toolsets = self._apply_runtime_progressive_toolsets(toolsets)
+        combined_instructions = self._merge_instructions(instructions)
+        return resolved_deps, resolved_toolsets, combined_instructions
+
     @override
     def run_stream_native(
         self,
@@ -905,9 +922,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         Run the agent with OpenBB-specific defaults for
         deps, messages, and deferred results.
         """
-        resolved_deps: OpenBBDeps = deps or self.deps
-        toolsets = self._apply_runtime_progressive_toolsets(toolsets)
-        combined_instructions = self._merge_instructions(instructions)
+        resolved_deps, toolsets, combined_instructions = self._resolve_stream_defaults(
+            deps=deps,
+            toolsets=toolsets,
+            instructions=instructions,
+        )
 
         return super().run_stream_native(
             output_type=output_type,
@@ -945,9 +964,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         on_complete: OnCompleteFunc[SSE] | None = None,
     ):
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
-        resolved_deps: OpenBBDeps = deps or self.deps
-        toolsets = self._apply_runtime_progressive_toolsets(toolsets)
-        combined_instructions = self._merge_instructions(instructions)
+        resolved_deps, toolsets, combined_instructions = self._resolve_stream_defaults(
+            deps=deps,
+            toolsets=toolsets,
+            instructions=instructions,
+        )
 
         return super().run_stream(
             output_type=output_type,
