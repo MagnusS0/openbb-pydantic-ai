@@ -55,13 +55,12 @@ def test_html_params_allows_optional_fields_to_be_none() -> None:
 
 def test_create_html_returns_tool_return_with_artifact() -> None:
     ctx = MagicMock()
-    params = HtmlParams(
+    result = _create_html(
+        ctx,
         content="<article>Article content</article>",
         name="Article",
         description="An article artifact",
     )
-
-    result = _create_html(ctx, params)
 
     assert result.return_value == "HTML artifact created successfully."
     assert "html" in result.metadata

@@ -35,6 +35,21 @@ def normalize_args(args: Any) -> dict[str, Any]:
     return {}
 
 
+def get_first_data_source(
+    input_arguments: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Return the first data source mapping from `get_widget_data` arguments."""
+    data_sources = input_arguments.get("data_sources")
+    if not isinstance(data_sources, list) or not data_sources:
+        return None
+
+    first = data_sources[0]
+    if not isinstance(first, Mapping):
+        return None
+
+    return first
+
+
 def extract_tool_call_id(message: LlmClientFunctionCallResultMessage) -> str:
     """Extract the tool_call_id from a result message or raise if missing."""
 

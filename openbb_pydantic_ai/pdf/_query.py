@@ -76,14 +76,11 @@ def collect_provenance(doc: DoclingDocument) -> list[tuple[ProvenanceItem, str]]
     the text lives on the parent ``DocItem``.  We pair them here so that
     downstream citation builders have access to both.
     """
-    results: list[tuple[Any, str]] = []
-    for item, _level in doc.iterate_items():
-        text = getattr(item, "text", "") or ""
-        prov_list = getattr(item, "prov", None)
-        if prov_list:
-            for prov in prov_list:
-                results.append((prov, text))
-    return results
+    return [
+        (prov, getattr(item, "text", "") or "")
+        for item, _level in doc.iterate_items()
+        for prov in (getattr(item, "prov", None) or ())
+    ]
 
 
 def read_section_markdown(

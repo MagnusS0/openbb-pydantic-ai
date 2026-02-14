@@ -126,12 +126,7 @@ def _message_aliases_for_data_index(
         return set()
 
     selected: list[dict[str, Any]] = []
-    if data_count == len(data_sources):
-        if data_index < len(data_sources) and isinstance(
-            data_sources[data_index], dict
-        ):
-            selected.append(data_sources[data_index])
-    elif data_count == 1:
+    if data_count == 1:
         selected.extend(s for s in data_sources if isinstance(s, dict))
     elif data_index < len(data_sources) and isinstance(data_sources[data_index], dict):
         selected.append(data_sources[data_index])

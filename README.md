@@ -145,6 +145,103 @@ callbacks—any option supported by `Agent.run_stream_events()` is accepted.
   the runtime instructions automatically; append your own instructions without
   re-supplying that context.
 
+### Progressive Tool Discovery (Default)
+
+`OpenBBAIAdapter` now wraps toolsets with a progressive discovery layer by
+default. Instead of exposing every tool schema upfront, the model gets 4
+meta-tools:
+
+- `list_tools`
+- `search_tools`
+- `get_tool_schema`
+- `call_tools`
+
+This keeps the initial prompt smaller and fetches full schemas only when needed.
+Deferred tools are still delegated to the original toolsets, so widget/MCP
+flows continue to emit `get_widget_data` and `execute_agent_tool` events as
+before.
+
+If you need the previous direct-tool behavior, disable it when creating the
+adapter:
+
+```python
+adapter = OpenBBAIAdapter(
+    agent=agent,
+    run_input=run_input,
+    enable_progressive_tool_discovery=False,
+)
+```
+
+### Adding Custom Tools to Progressive Discovery
+
+You can add third-party/custom toolsets to the adapter's progressive discovery
+without subclassing `OpenBBAIAdapter`.
+
+Important integration rule:
+
+- Pass tagged toolsets to the adapter runtime (`adapter.run_stream(..., toolsets=...)`
+  or `OpenBBAIAdapter.dispatch_request(..., toolsets=...)`).
+- Do **not** mount those same toolsets directly on `Agent(toolsets=[...])` when
+  using the OpenBB adapter, or they can appear as direct/base tools in addition
+  to progressive discovery.
+
+Use `add_to_progressive(...)` to tag an entire toolset:
+
+```python
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import RunContext
+
+from openbb_pydantic_ai import OpenBBDeps
+from openbb_pydantic_ai.tool_discovery import add_to_progressive
+
+custom_tools = FunctionToolset[OpenBBDeps](id="custom_agent_tools")
+
+@custom_tools.tool
+def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
+    _ = ctx
+    return f"Custom note for {symbol}"
+
+add_to_progressive(
+    custom_tools,
+    group="custom_agent_tools",
+    description="Custom user tools",
+)
+
+stream = adapter.run_stream(toolsets=[custom_tools])
+```
+
+The same pattern for FastAPI `dispatch_request`:
+
+```python
+return await OpenBBAIAdapter.dispatch_request(
+    request,
+    agent=agent,
+    toolsets=[custom_tools],
+)
+```
+
+Or use `@progressive(...)` on a tool function to tag the containing toolset:
+
+```python
+from openbb_pydantic_ai.tool_discovery import progressive
+
+@progressive(
+    toolset=custom_tools,
+    group="custom_agent_tools",
+    description="Custom user tools",
+)
+@custom_tools.tool
+def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
+    _ = ctx
+    return f"Custom note for {symbol}"
+```
+
+Behavior:
+
+- Tagged toolsets are merged into the adapter's single progressive wrapper.
+- Untagged toolsets are forwarded as standalone toolsets.
+- This avoids creating multiple progressive control planes in one run.
+
 ## Features
 
 ### Widget Toolsets

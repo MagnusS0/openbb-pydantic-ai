@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from openbb_ai.models import (
     LlmClientFunctionCallResultMessage,
@@ -12,12 +12,17 @@ from openbb_ai.models import (
 )
 
 from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
-from openbb_pydantic_ai._utils import iter_widget_collection
+from openbb_pydantic_ai._utils import get_first_data_source, iter_widget_collection
 
 if TYPE_CHECKING:
     from pydantic_ai.toolsets import AbstractToolset
 
     from openbb_pydantic_ai._dependencies import OpenBBDeps
+
+
+@runtime_checkable
+class HasWidgetsByTool(Protocol):
+    widgets_by_tool: Mapping[str, Widget]
 
 
 class WidgetRegistry:
@@ -49,9 +54,8 @@ class WidgetRegistry:
         # Build lookup from toolsets
         if toolsets:
             for toolset in toolsets:
-                widgets = getattr(toolset, "widgets_by_tool", None)
-                if widgets:
-                    for tool_name, widget in widgets.items():
+                if isinstance(toolset, HasWidgetsByTool):
+                    for tool_name, widget in toolset.widgets_by_tool.items():
                         _register(widget, tool_name=tool_name)
 
         # Also index from collection if provided
@@ -111,11 +115,13 @@ class WidgetRegistry:
 
         # Check if it's a get_widget_data call
         if result.function == GET_WIDGET_DATA_TOOL_NAME:
-            data_sources = result.input_arguments.get("data_sources", [])
-            if data_sources:
-                widget_uuid = data_sources[0].get("widget_uuid")
-                if widget_uuid:
-                    return self.find_by_uuid(widget_uuid)
+            first_data_source = get_first_data_source(result.input_arguments)
+            if first_data_source is None:
+                return None
+
+            widget_uuid = first_data_source.get("widget_uuid")
+            if isinstance(widget_uuid, str):
+                return self.find_by_uuid(widget_uuid)
 
         return None
 

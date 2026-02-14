@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable
 
 from openbb_ai.models import (
     QueryRequest,
@@ -56,18 +56,12 @@ class OpenBBDeps:
 
 def build_deps_from_request(request: QueryRequest) -> OpenBBDeps:
     """Create an OpenBBDeps instance from an incoming QueryRequest."""
-    context: Sequence[RawContext] | None = request.context
-    urls: Sequence[str] | None = request.urls
-
-    workspace_state = request.workspace_state
-
+    ws = request.workspace_state
     return OpenBBDeps(
         widgets=request.widgets,
-        context=list(context) if context is not None else None,
-        urls=list(urls) if urls is not None else None,
-        workspace_state=workspace_state,
+        context=list(request.context) if request.context is not None else None,
+        urls=list(request.urls) if request.urls is not None else None,
+        workspace_state=ws,
         timezone=request.timezone,
-        state=workspace_state.model_dump(exclude_none=True)
-        if workspace_state is not None
-        else {},
+        state=ws.model_dump(exclude_none=True) if ws is not None else {},
     )

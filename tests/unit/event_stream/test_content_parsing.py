@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from openbb_ai.models import MessageChunkSSE, StatusUpdateSSE
 
+from openbb_pydantic_ai._event_stream_formatters import _format_meta_tool_call_args
 from openbb_pydantic_ai._event_stream_helpers import (
     ToolCallInfo,
     handle_generic_tool_result,
@@ -204,3 +205,305 @@ def test_handle_generic_tool_result_emits_artifacts() -> None:
     status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
     assert status_data.artifacts
+
+
+def test_handle_generic_tool_result_formats_discovery_list_tools() -> None:
+    info = ToolCallInfo(tool_name="list_tools", args={})
+
+    events = handle_generic_tool_result(
+        info,
+        content=(
+            "# openbb_viz_tools\n"
+            "count: 2\n"
+            "- openbb_create_chart: Create chart artifacts\n"
+            "- openbb_create_table: Create table artifacts\n"
+        ),
+        mark_streamed_text=lambda: None,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    assert status_event.event == "copilotStatusUpdate"
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details
+    detail_row = details[0]
+    assert detail_row["Tool count"] == "2"
+    assert "openbb_create_chart" in detail_row["Tools"]
+    assert "Result" not in detail_row
+
+
+def test_handle_generic_tool_result_formats_discovery_search_empty() -> None:
+    info = ToolCallInfo(tool_name="search_tools", args={"query": "database"})
+
+    events = handle_generic_tool_result(
+        info,
+        content="No tools found.",
+        mark_streamed_text=lambda: None,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details
+    detail_row = details[0]
+    assert detail_row["Match count"] == "0"
+    assert detail_row["Matches"] == "(none)"
+    # Raw args should not leak into discovery details
+    assert "query" not in detail_row
+
+
+def test_handle_generic_tool_result_formats_discovery_tool_schema() -> None:
+    info = ToolCallInfo(tool_name="get_tool_schema", args={"tool_name": "query_db"})
+    schema_payload = (
+        "<query_db>\n"
+        + json.dumps(
+            {
+                "group": "openbb_mcp_tools",
+                "description": "Run a database query",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                },
+            }
+        )
+        + "\n</query_db>"
+    )
+
+    events = handle_generic_tool_result(
+        info,
+        content=schema_payload,
+        mark_streamed_text=lambda: None,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details
+    detail_row = details[0]
+    assert detail_row["Name"] == "query_db"
+    assert detail_row["Group"] == "openbb_mcp_tools"
+    assert detail_row["Parameter count"] == "2"
+    assert detail_row["Required count"] == "1"
+    assert "query" in detail_row["Parameters"]
+    assert "Result" not in detail_row
+
+
+def test_handle_generic_tool_result_formats_discovery_multi_tool_schema() -> None:
+    info = ToolCallInfo(
+        tool_name="get_tool_schema",
+        args={"tool_names": ["query_db", "search_news"]},
+    )
+    schema_payload = "\n".join(
+        [
+            "<query_db>",
+            json.dumps(
+                {
+                    "group": "openbb_mcp_tools",
+                    "description": "Run a database query",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ),
+            "</query_db>",
+            "<search_news>",
+            json.dumps(
+                {
+                    "group": "openbb_mcp_tools",
+                    "description": "Search recent news",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ),
+            "</search_news>",
+        ]
+    )
+
+    events = handle_generic_tool_result(
+        info,
+        content=schema_payload,
+        mark_streamed_text=lambda: None,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details
+    detail_row = details[0]
+    assert detail_row["Schema count"] == "2"
+    assert "query_db" in detail_row["Tools"]
+    assert "search_news" in detail_row["Tools"]
+    assert "Result" not in detail_row
+
+
+def test_tool_result_events_handle_list_of_strings_as_error() -> None:
+    error_msg = (
+        "Error calling tool 'query_database': (sqlite3.OperationalError) no such table"
+    )
+    content_json = json.dumps([error_msg])
+
+    payload = {
+        "data": [
+            {
+                "items": [
+                    raw_object_item(
+                        content_json,
+                        parse_as="json",
+                    )
+                ]
+            }
+        ]
+    }
+
+    events = tool_result_events_from_content(payload, mark_streamed_text=lambda: None)
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    status_data = status_event.data
+    assert status_event.event == "copilotStatusUpdate"
+    assert status_data.eventType == "ERROR"
+    assert error_msg in status_data.message
+    assert status_data.details
+    details_list = cast(list[dict[str, Any]], status_data.details)
+    assert details_list[0]["errors"] == [error_msg]
+
+
+def test_tool_result_events_handle_list_of_strings_as_text() -> None:
+    """Non-error list of strings is streamed as raw text."""
+    info_msg = "Some info message"
+    content_json = json.dumps([info_msg])
+
+    payload = {
+        "data": [
+            {
+                "items": [
+                    raw_object_item(
+                        content_json,
+                        parse_as="json",
+                    )
+                ]
+            }
+        ]
+    }
+
+    mark_called = False
+
+    def _mark() -> None:
+        nonlocal mark_called
+        mark_called = True
+
+    events = tool_result_events_from_content(payload, mark_streamed_text=_mark)
+
+    assert len(events) == 1
+    chunk_event = events[0]
+    assert isinstance(chunk_event, MessageChunkSSE)
+    assert mark_called
+
+
+# --- _format_meta_tool_call_args tests ---
+
+
+def test_format_meta_tool_call_args_call_tools_multi() -> None:
+    args = {
+        "calls": [
+            {
+                "tool_name": "openbb_widget_financial_statements",
+                "arguments": {"symbol": "CDE", "period": "annual"},
+            },
+            {
+                "tool_name": "openbb_widget_price_chart",
+                "arguments": {"symbol": "CDE"},
+            },
+        ]
+    }
+    result = _format_meta_tool_call_args("call_tools", args)
+    assert result is not None
+    assert result["Tool count"] == "2"
+    assert "openbb_widget_financial_statements" in result["Tools"]
+    assert "openbb_widget_price_chart" in result["Tools"]
+    assert 'symbol="CDE"' in result["Tools"]
+
+
+def test_format_meta_tool_call_args_call_tools_single_formats_entry() -> None:
+    """Single-call call_tools is unwrapped by _extract_effective_tool_call."""
+    args = {
+        "calls": [
+            {"tool_name": "some_tool", "arguments": {"x": 1}},
+        ]
+    }
+    # Single call still returns formatting (the caller decides via extract)
+    result = _format_meta_tool_call_args("call_tools", args)
+    assert result is not None
+    assert result["Tool count"] == "1"
+
+
+def test_format_meta_tool_call_args_get_tool_schema() -> None:
+    args = {"tool_names": ["openbb_widget_financial_statements", "price_chart"]}
+    result = _format_meta_tool_call_args("get_tool_schema", args)
+    assert result is not None
+    assert "openbb_widget_financial_statements" in result["Tools"]
+    assert "price_chart" in result["Tools"]
+
+
+# --- call_tools result formatting ---
+
+
+def test_handle_generic_tool_result_formats_call_tools_results() -> None:
+    info = ToolCallInfo(tool_name="call_tools", args={})
+
+    content = (
+        "# Results\n\n"
+        "## openbb_widget_financial_statements\n"
+        '{"rows":10}\n\n'
+        "## openbb_widget_price_chart\n"
+        "ok"
+    )
+
+    events = handle_generic_tool_result(
+        info,
+        content=content,
+        mark_streamed_text=lambda: None,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details
+    detail_row = details[0]
+    assert detail_row["Result count"] == "2"
+    assert "openbb_widget_financial_statements" in detail_row["Results"]
+    assert "openbb_widget_price_chart" in detail_row["Results"]
+
+
+def test_handle_generic_tool_result_discovery_no_raw_args_prefix() -> None:
+    """Discovery meta-tool results should not include raw args in details."""
+    info = ToolCallInfo(
+        tool_name="get_tool_schema",
+        args={"tool_names": ["openbb_widget_financial_statements"]},
+    )
+    schema_payload = (
+        "<openbb_widget_financial_statements>\n"
+        + json.dumps(
+            {
+                "description": "Financial statements",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        )
+        + "\n</openbb_widget_financial_statements>"
+    )
+
+    events = handle_generic_tool_result(
+        info,
+        content=schema_payload,
+        mark_streamed_text=lambda: None,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details
+    detail_row = details[0]
+    # Should have discovery details, not raw args
+    assert "Name" in detail_row
+    assert "tool_names" not in detail_row

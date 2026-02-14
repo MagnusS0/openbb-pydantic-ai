@@ -141,10 +141,7 @@ def _build_sections(items: tuple[Any, ...]) -> list[SectionNode]:
     Each section's range extends to the next header at same-or-higher level,
     ensuring parent sections include all nested child sections.
     """
-    headers: list[tuple[int, Any]] = []
-    for idx, item in enumerate(items):
-        if _is_section_item(item):
-            headers.append((idx, item))
+    headers = [(idx, item) for idx, item in enumerate(items) if _is_section_item(item)]
 
     if not headers:
         if not items:

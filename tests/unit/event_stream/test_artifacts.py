@@ -19,6 +19,7 @@ from openbb_pydantic_ai._config import (
     HTML_TOOL_NAME,
 )
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
+from openbb_pydantic_ai._event_stream_helpers import artifact_from_output
 from openbb_pydantic_ai._viz_toolsets import _html_artifact
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 from openbb_pydantic_ai._widget_toolsets import build_widget_tool_name
@@ -104,24 +105,16 @@ def test_widget_dict_results_render_tool_output(
     assert price.startswith("272")
 
 
-def test_artifact_detection_for_table(make_request) -> None:
-    request = make_request(
-        [LlmClientMessage(role=RoleEnum.human, content="Data please")]
-    )
-    stream = OpenBBAIEventStream(run_input=request)
-
-    artifact = stream._artifact_from_output([{"col": 1}, {"col": 2}])
+def test_artifact_detection_for_table() -> None:
+    artifact = artifact_from_output([{"col": 1}, {"col": 2}])
     assert artifact is not None
     assert artifact.event == "copilotMessageArtifact"
     message_artifact = cast(MessageArtifactSSE, artifact)
     assert message_artifact.data.type == "table"
 
 
-def test_artifact_detection_normalizes_chart_payload(make_request) -> None:
-    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Chart")])
-    stream = OpenBBAIEventStream(run_input=request)
-
-    artifact = stream._artifact_from_output(
+def test_artifact_detection_normalizes_chart_payload() -> None:
+    artifact = artifact_from_output(
         {
             "type": "bar",
             "data": [{"label": "A", "value": 1}],
@@ -251,18 +244,12 @@ def test_html_tool_result_queues_artifact(make_request) -> None:
     ids=["html_content_key", "html_html_key"],
 )
 def test_artifact_detection_for_html_output(
-    make_request,
     payload: dict[str, str],
     expected_content: str,
     expected_name: str | None,
     expected_description: str | None,
 ) -> None:
-    request = make_request(
-        [LlmClientMessage(role=RoleEnum.human, content="Generate HTML")]
-    )
-    stream = OpenBBAIEventStream(run_input=request)
-
-    artifact = stream._artifact_from_output(payload)
+    artifact = artifact_from_output(payload)
 
     assert artifact is not None
     assert artifact.event == "copilotMessageArtifact"
