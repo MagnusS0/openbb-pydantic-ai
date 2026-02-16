@@ -4,6 +4,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic_ai import ToolReturn
 from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -387,3 +388,53 @@ async def test_tool_discovery_executes_viz_tools(
     metadata = getattr(result, "metadata", None)
     assert isinstance(metadata, dict)
     assert metadata_key in metadata
+
+
+async def test_call_tools_preserves_single_toolreturn_metadata() -> None:
+    viz_toolset = build_viz_toolsets()
+    discovery = ToolDiscoveryToolset(
+        toolsets=[("viz", cast(AbstractToolset[Any], viz_toolset))]
+    )
+
+    result = await discovery._call_tools_impl(
+        _build_run_context(),
+        [{"tool_name": "openbb_create_html", "arguments": {"content": "<div>x</div>"}}],
+    )
+
+    assert isinstance(result, ToolReturn)
+    assert result.return_value == "HTML artifact created successfully."
+    assert isinstance(result.metadata, dict)
+    assert "html" in result.metadata
+
+
+async def test_call_tools_markdown_does_not_include_toolreturn_metadata() -> None:
+    tool_with_metadata = _toolset(
+        name="returns_toolreturn",
+        description="Returns ToolReturn payload",
+        result=ToolReturn(return_value="safe", metadata={"secret": "should_not_leak"}),
+    )
+    plain_tool = _toolset(
+        name="plain",
+        description="Returns plain value",
+        result=123,
+    )
+    discovery = ToolDiscoveryToolset(
+        toolsets=[
+            ("test", cast(AbstractToolset[Any], tool_with_metadata)),
+            ("test", cast(AbstractToolset[Any], plain_tool)),
+        ]
+    )
+
+    result = await discovery._call_tools_impl(
+        _build_run_context(),
+        [
+            {"tool_name": "returns_toolreturn", "arguments": {}},
+            {"tool_name": "plain", "arguments": {}},
+        ],
+    )
+
+    assert isinstance(result, str)
+    assert "safe" in result
+    assert "123" in result
+    assert "should_not_leak" not in result
+    assert "metadata" not in result

@@ -8,9 +8,10 @@ import re
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 from pydantic import BaseModel, Field
+from pydantic_ai import ToolReturn
 from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
@@ -21,6 +22,9 @@ if TYPE_CHECKING:
 ToolsetSource = AbstractToolset[Any] | tuple[str, AbstractToolset[Any]]
 
 _XML_TAG_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+_MISSING_TOOL_GUIDANCE = (
+    "Run list_tools or search_tools first, then get_tool_schema before calling tools."
+)
 
 
 class _ToolCallSpec(BaseModel):
@@ -279,8 +283,9 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                         ]
 
                 Returns:
-                    Deferred requests (for deferred tools) or a markdown result
-                    summary grouped by tool invocation.
+                    Deferred requests (for deferred tools), a native
+                    `ToolReturn` for single-call metadata-preserving tool
+                    responses, or a markdown summary grouped by tool invocation.
                 """
                 return await self._call_tools_impl(
                     ctx, [call.model_dump() for call in calls]
@@ -292,6 +297,10 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
 
     @staticmethod
     def _tool_result_to_text(value: Any) -> str:
+        if isinstance(value, ToolReturn):
+            # ToolReturn metadata is app-only; only expose the return value in
+            # textual summaries to avoid leaking metadata into model context.
+            return ToolDiscoveryToolset._tool_result_to_text(value.return_value)
         if value is None:
             return "null"
         if isinstance(value, str):
@@ -309,6 +318,23 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             return f"<{tag_name}>\n{payload_text}\n</{tag_name}>"
         escaped = html.escape(tag_name, quote=True)
         return f'<tool name="{escaped}">\n{payload_text}\n</tool>'
+
+    @staticmethod
+    def _raise_missing_tools(missing_tool_names: Sequence[str]) -> NoReturn:
+        missing_display = ", ".join(missing_tool_names[:20])
+        raise ValueError(
+            f"Tool(s) not found: {missing_display}. {_MISSING_TOOL_GUIDANCE}"
+        )
+
+    @staticmethod
+    def _raise_missing_tool(tool_name: str) -> NoReturn:
+        raise ValueError(f"Tool '{tool_name}' not found. {_MISSING_TOOL_GUIDANCE}")
+
+    def _get_registered_tool(self, tool_name: str) -> _RegisteredTool:
+        tool = self._registry.get(tool_name)
+        if tool is None:
+            raise ValueError(f"Tool '{tool_name}' not found. {_MISSING_TOOL_GUIDANCE}")
+        return tool
 
     def _format_tools_markdown(
         self,
@@ -395,12 +421,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
 
         missing = [name for name in deduped_names if name not in self._registry]
         if missing:
-            available = ", ".join(sorted(self._registry)[:20])
-            missing_display = ", ".join(missing[:20])
-            raise ValueError(
-                f"Tool(s) not found: {missing_display}. "
-                f"Some available tools: {available}"
-            )
+            self._raise_missing_tools(missing)
 
         blocks: list[str] = []
         for name in deduped_names:
@@ -428,12 +449,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
     ) -> Any:
         await self._resolve_pending(ctx)
         resolved_tool_name = tool_name
-        tool = self._registry.get(resolved_tool_name)
-        if tool is None:
-            available = ", ".join(sorted(self._registry)[:20])
-            raise ValueError(
-                f"Tool '{tool_name}' not found. Some available tools: {available}"
-            )
+        tool = self._get_registered_tool(resolved_tool_name)
 
         if arguments is None:
             args = {}
@@ -479,7 +495,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         ctx: RunContext[Any],
         calls: list[dict[str, Any]] | dict[str, Any],
     ) -> Any:
-        """Execute multiple tools and merge deferred requests."""
+        """Execute tools, preserving deferred semantics and single-call ToolReturn."""
         normalized_calls: list[dict[str, Any]]
         if isinstance(calls, dict):
             normalized_calls = [calls]
@@ -502,12 +518,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
 
         for entry in normalized_calls:
             tool_name = entry["tool_name"]
-            tool = self._registry.get(tool_name)
-            if tool is None:
-                available = ", ".join(sorted(self._registry)[:20])
-                raise ValueError(
-                    f"Tool '{tool_name}' not found. Some available tools: {available}"
-                )
+            tool = self._get_registered_tool(tool_name)
 
             if self._is_deferred_tool(tool):
                 deferred_candidates.append(tool_name)
@@ -550,6 +561,13 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             # with proper deferred semantics.  The metadata carries the
             # actual tool calls so the adapter can reconstruct them.
             raise CallDeferred(metadata={"deferred_calls": deferred_calls})
+
+        # Preserve native ToolReturn semantics for single-call execution so
+        # metadata (e.g., chart/html artifacts) remains available to the app.
+        if len(results) == 1:
+            single_result = results[0]["result"]
+            if isinstance(single_result, ToolReturn):
+                return single_result
 
         lines: list[str] = ["# Results"]
         for entry in results:
