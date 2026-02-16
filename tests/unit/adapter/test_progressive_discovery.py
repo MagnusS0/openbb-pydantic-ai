@@ -11,12 +11,13 @@ from openbb_ai.models import (
     RoleEnum,
 )
 from pydantic_ai.tools import RunContext
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import CombinedToolset, FunctionToolset
 
 from openbb_pydantic_ai import OpenBBAIAdapter, OpenBBDeps
 from openbb_pydantic_ai._config import (
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
+    PDF_QUERY_TOOL_NAME,
 )
 from openbb_pydantic_ai._widget_toolsets import build_widget_tool_name
 from openbb_pydantic_ai.tool_discovery import (
@@ -27,6 +28,17 @@ from openbb_pydantic_ai.tool_discovery import (
 from tests.unit.adapter._assertions import tool_call_parts, tool_return_parts
 
 pytestmark = pytest.mark.regression_contract
+
+
+def _contains_discovery_toolset(toolset: object) -> bool:
+    if isinstance(toolset, ToolDiscoveryToolset):
+        return True
+    if isinstance(toolset, CombinedToolset):
+        return any(
+            isinstance(inner_toolset, ToolDiscoveryToolset)
+            for inner_toolset in toolset.toolsets
+        )
+    return False
 
 
 def _build_call_and_result(
@@ -98,7 +110,7 @@ def test_progressive_toggle_controls_toolset_instructions_and_rewrite(
     assert returns
 
     if enable_progressive:
-        assert isinstance(adapter.toolset, ToolDiscoveryToolset)
+        assert _contains_discovery_toolset(adapter.toolset)
         assert "progressive disclosure" in adapter.instructions
         assert calls[0].tool_name == "call_tools"
         assert returns[0].tool_name == "call_tools"
@@ -175,7 +187,7 @@ async def test_runtime_toolset_routing(
         assert expected_group is not None
         assert expected_group in group_ids
         assert len(forwarded) == 1
-        assert isinstance(forwarded[0], ToolDiscoveryToolset)
+        assert _contains_discovery_toolset(forwarded[0])
         assert all(toolset is not custom_tools for toolset in forwarded)
     else:
         assert expected_group is None
@@ -273,3 +285,33 @@ def test_rewrite_is_gated_by_tool_call_id_mapping(
     assert return_names["id-a"] == "call_tools"
     assert call_names["id-b"] == GET_WIDGET_DATA_TOOL_NAME
     assert return_names["id-b"] == GET_WIDGET_DATA_TOOL_NAME
+
+
+async def test_progressive_toolset_keeps_pdf_query_direct(
+    make_request,
+    agent_stream_stub,
+) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    adapter = OpenBBAIAdapter(agent=agent_stream_stub, run_input=request)
+
+    group_ids = {group_id for group_id, _ in adapter._progressive_named_toolsets}
+    assert all("pdf" not in group_id for group_id in group_ids)
+
+    stream = adapter.run_stream()
+    async for _ in stream:
+        pass
+
+    _, kwargs = agent_stream_stub.calls[0]
+    forwarded = kwargs.get("toolsets")
+    assert forwarded is not None
+    assert len(forwarded) == 1
+
+    combined = forwarded[0]
+    assert isinstance(combined, CombinedToolset)
+    inner_toolsets = combined.toolsets
+
+    assert any(isinstance(toolset, ToolDiscoveryToolset) for toolset in inner_toolsets)
+    assert any(
+        isinstance(toolset, FunctionToolset) and PDF_QUERY_TOOL_NAME in toolset.tools
+        for toolset in inner_toolsets
+    )

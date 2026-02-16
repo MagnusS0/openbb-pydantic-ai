@@ -743,7 +743,18 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         if not self._toolsets:
             return None
         if self.enable_progressive_tool_discovery:
-            return cast(AbstractToolset[OpenBBDeps], self._progressive_toolset)
+            if self._pdf_toolset is None:
+                return cast(AbstractToolset[OpenBBDeps], self._progressive_toolset)
+
+            # Keep PDF query available as a direct tool while other OpenBB tools
+            # use progressive discovery.
+            combined_progressive = CombinedToolset(
+                cast(
+                    "Sequence[AbstractToolset[None]]",
+                    (self._progressive_toolset, self._pdf_toolset),
+                )
+            )
+            return cast(AbstractToolset[OpenBBDeps], combined_progressive)
         if len(self._toolsets) == 1:
             return self._toolsets[0]
         combined = CombinedToolset(
