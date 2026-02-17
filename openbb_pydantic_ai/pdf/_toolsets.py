@@ -233,7 +233,7 @@ def _get_tables(cached: CachedDocument) -> str:
 
 def _read_table(cached: CachedDocument, params: PdfQueryParams) -> str | ToolReturn:
     if params.table_index is None:
-        raise ValueError("table_index is required for read_table action.")
+        return "read_table requires `table_index`."
     table = read_table_markdown(cached, params.table_index)
     if table is None:
         return (

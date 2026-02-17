@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import pytest
-from openbb_ai.models import LlmClientMessage, RoleEnum
+from openbb_ai.models import (
+    ClientCommandResult,
+    LlmClientFunctionCall,
+    LlmClientFunctionCallResultMessage,
+    LlmClientMessage,
+    RoleEnum,
+)
 from pydantic_ai.messages import TextPart, UserPromptPart
 
 from openbb_pydantic_ai._message_transformer import MessageTransformer
@@ -29,3 +35,27 @@ def test_transform_batch_handles_all_supported_text_roles(
     parts = [part for message in transformed for part in message.parts]
     assert len(parts) == 1
     assert isinstance(parts[0], expected_part_type)
+
+
+def test_transform_batch_skips_result_without_tool_call_id(caplog) -> None:
+    call_message = LlmClientMessage(
+        role=RoleEnum.ai,
+        content=LlmClientFunctionCall(
+            function="get_widget_data",
+            input_arguments={"data_sources": []},
+        ),
+    )
+    result_message = LlmClientFunctionCallResultMessage(
+        function="get_widget_data",
+        input_arguments={"data_sources": []},
+        data=[ClientCommandResult(status="success", message=None)],
+        extra_state={},
+    )
+
+    with caplog.at_level("WARNING"):
+        transformed = MessageTransformer().transform_batch(
+            [call_message, result_message]
+        )
+
+    assert transformed == []
+    assert "Skipping result message for 'get_widget_data'" in caplog.text

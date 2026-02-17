@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
@@ -35,6 +36,8 @@ from openbb_pydantic_ai._utils import extract_tool_call_id
 _REWRITABLE_FUNCTIONS = frozenset({GET_WIDGET_DATA_TOOL_NAME, EXECUTE_MCP_TOOL_NAME})
 
 _CALL_TOOLS = "call_tools"
+
+logger = logging.getLogger(__name__)
 
 
 class MessageTransformer:
@@ -227,11 +230,11 @@ class MessageTransformer:
                 for i, data_source in enumerate(data_sources):
                     idx = counter + i
                     if idx >= len(tool_call_ids):
-                        raise ValueError(
-                            f"""
-                            Not enough tool_call_ids for batched call to {function_name}
-                            """.strip()
+                        logger.warning(
+                            "Not enough tool_call_ids for batched call to %s",
+                            function_name,
                         )
+                        return
 
                     tc_id = tool_call_ids[idx]
                     source_args: dict[str, Any] = {"data_sources": [data_source]}
@@ -252,12 +255,11 @@ class MessageTransformer:
 
             counter = call_counters.get(function_name, 0)
             if counter >= len(tool_call_ids):
-                raise ValueError(
-                    """
-                    `tool_call_id` is required for deferred tool calls
-                    but not enough IDs were found in prior result messages
-                    """.strip()
+                logger.warning(
+                    "`tool_call_id` is required for deferred tool calls "
+                    "but not enough IDs were found in prior result messages"
                 )
+                return
             tool_call_id = tool_call_ids[counter]
             call_counters[function_name] = counter + 1
 
@@ -309,7 +311,15 @@ class MessageTransformer:
             self._add_unbatched_results(builder, message, tool_name_map)
             return
 
-        tool_call_id = extract_tool_call_id(message)
+        try:
+            tool_call_id = extract_tool_call_id(message)
+        except ValueError as exc:
+            logger.warning(
+                "Skipping result message for '%s': %s",
+                message.function,
+                exc,
+            )
+            return
         result_tool_name = message.function
 
         if self._should_rewrite(result_tool_name, tool_call_id, tool_name_map):

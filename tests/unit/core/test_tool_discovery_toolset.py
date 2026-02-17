@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from pydantic_ai import ToolReturn
-from pydantic_ai.exceptions import CallDeferred
+from pydantic_ai.exceptions import CallDeferred, ModelRetry
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, ExternalToolset
@@ -137,7 +137,7 @@ async def test_get_tool_schema_deduplicates_requested_names() -> None:
 async def test_get_tool_schema_requires_non_empty_tool_names() -> None:
     discovery = ToolDiscoveryToolset()
     with pytest.raises(
-        ValueError,
+        ModelRetry,
         match="`tool_names` must contain at least one tool name",
     ):
         await discovery._get_tool_schema_impl(MagicMock(), [])
@@ -154,7 +154,7 @@ async def test_call_tool_rejects_non_object_arguments() -> None:
         toolsets=[("symbols", cast(AbstractToolset[Any], echo))]
     )
 
-    with pytest.raises(ValueError, match="must be an object/dictionary"):
+    with pytest.raises(ModelRetry, match="must be an object/dictionary"):
         await discovery._call_tool_impl(MagicMock(), "echo", cast(Any, ["SILJ"]))
 
 
@@ -299,13 +299,28 @@ async def test_call_tools_rejects_mixed_deferred_and_immediate_results() -> None
         ]
     )
 
-    with pytest.raises(ValueError, match="mixed deferred tools and immediate tools"):
+    with pytest.raises(ModelRetry, match="mixed deferred tools and immediate tools"):
         await discovery._call_tools_impl(
             _build_run_context(),
             [
                 {"tool_name": "add", "arguments": {"a": 1, "b": 2}},
                 {"tool_name": "widget_a", "arguments": {"symbol": "AAPL"}},
             ],
+        )
+
+
+async def test_call_tools_unknown_tool_raises_model_retry() -> None:
+    add = _toolset(
+        name="add", description="Add", result=lambda args: args["a"] + args["b"]
+    )
+    discovery = ToolDiscoveryToolset(
+        toolsets=[("math", cast(AbstractToolset[Any], add))]
+    )
+
+    with pytest.raises(ModelRetry, match="Run list_tools or search_tools first"):
+        await discovery._call_tools_impl(
+            _build_run_context(),
+            [{"tool_name": "openbb_widgets_secondary", "arguments": {}}],
         )
 
 
@@ -323,7 +338,7 @@ async def test_call_tools_validates_input_shape(
     error_text: str,
 ) -> None:
     discovery = ToolDiscoveryToolset()
-    with pytest.raises(ValueError, match=error_text):
+    with pytest.raises(ModelRetry, match=error_text):
         await discovery._call_tools_impl(MagicMock(), calls)
 
 

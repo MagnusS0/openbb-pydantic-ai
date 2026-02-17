@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 from pydantic import BaseModel, Field
 from pydantic_ai import ToolReturn
-from pydantic_ai.exceptions import CallDeferred
+from pydantic_ai.exceptions import CallDeferred, ModelRetry
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
@@ -322,19 +322,18 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
     @staticmethod
     def _raise_missing_tools(missing_tool_names: Sequence[str]) -> NoReturn:
         missing_display = ", ".join(missing_tool_names[:20])
-        raise ValueError(
+        raise ModelRetry(
             f"Tool(s) not found: {missing_display}. {_MISSING_TOOL_GUIDANCE}"
         )
 
     @staticmethod
     def _raise_missing_tool(tool_name: str) -> NoReturn:
-        raise ValueError(f"Tool '{tool_name}' not found. {_MISSING_TOOL_GUIDANCE}")
+        raise ModelRetry(f"Tool '{tool_name}' not found. {_MISSING_TOOL_GUIDANCE}")
 
     def _get_registered_tool(self, tool_name: str) -> _RegisteredTool:
-        tool = self._registry.get(tool_name)
-        if tool is None:
-            raise ValueError(f"Tool '{tool_name}' not found. {_MISSING_TOOL_GUIDANCE}")
-        return tool
+        if tool_name not in self._registry:
+            self._raise_missing_tool(tool_name)
+        return self._registry[tool_name]
 
     def _format_tools_markdown(
         self,
@@ -417,7 +416,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         # Preserve order while removing duplicates.
         deduped_names = list(dict.fromkeys(names))
         if not deduped_names:
-            raise ValueError("`tool_names` must contain at least one tool name.")
+            raise ModelRetry("`tool_names` must contain at least one tool name.")
 
         missing = [name for name in deduped_names if name not in self._registry]
         if missing:
@@ -456,7 +455,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         elif isinstance(arguments, dict):
             args = arguments
         else:
-            raise ValueError("Tool arguments must be an object/dictionary.")
+            raise ModelRetry("Tool arguments must be an object/dictionary.")
 
         if tool.source_toolset is not None and tool.tool_handle is not None:
             tool_kind = getattr(tool.tool_handle.tool_def, "kind", None)
@@ -502,14 +501,14 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         elif isinstance(calls, list):
             normalized_calls = calls
         else:
-            raise ValueError("`calls` must be an object or a list of objects.")
+            raise ModelRetry("`calls` must be an object or a list of objects.")
 
         if not normalized_calls:
-            raise ValueError("`calls` must contain at least one call.")
+            raise ModelRetry("`calls` must contain at least one call.")
 
         for i, entry in enumerate(normalized_calls):
             if not isinstance(entry, dict) or "tool_name" not in entry:
-                raise ValueError(f"Entry {i} must be an object with a `tool_name` key.")
+                raise ModelRetry(f"Entry {i} must be an object with a `tool_name` key.")
 
         # Pre-classify tools to detect mixed deferred/immediate before execution
         await self._resolve_pending(ctx)
@@ -529,7 +528,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         if deferred_candidates and immediate_candidates:
             deferred_display = ", ".join(sorted(set(deferred_candidates))[:12])
             immediate_display = ", ".join(sorted(set(immediate_candidates))[:12])
-            raise ValueError(
+            raise ModelRetry(
                 "The `call_tools` batch mixed deferred tools "
                 "and immediate tools. "
                 f"Deferred tools: {deferred_display}. "
