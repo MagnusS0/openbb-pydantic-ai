@@ -291,6 +291,7 @@ async def test_progressive_toolset_keeps_pdf_query_direct(
     make_request,
     agent_stream_stub,
 ) -> None:
+    pytest.importorskip("openbb_pydantic_ai.pdf")
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
     adapter = OpenBBAIAdapter(agent=agent_stream_stub, run_input=request)
 

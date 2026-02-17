@@ -8,6 +8,9 @@ from typing import Any, Sequence
 
 from pydantic import BaseModel, Field
 
+MAX_PACKED_SIZE = 250_000
+MAX_UNPACKED_SIZE = 2_000_000
+
 
 class LocalToolEntry(BaseModel):
     """Single local tool call/return entry captured in a capsule."""
@@ -27,11 +30,26 @@ class LocalToolState(BaseModel):
         raw = self.model_dump_json().encode()
         return base64.b85encode(zlib.compress(raw, 9)).decode("ascii")
 
+    @staticmethod
+    def _decompress_with_limit(compressed: bytes) -> bytes:
+        decompressor = zlib.decompressobj()
+        raw = decompressor.decompress(compressed, MAX_UNPACKED_SIZE + 1)
+        if len(raw) > MAX_UNPACKED_SIZE:
+            raise ValueError("Capsule payload exceeds maximum unpacked size.")
+        if not decompressor.eof:
+            raise ValueError("Capsule payload is incomplete or malformed.")
+        return raw
+
     @classmethod
     def unpack(cls, packed: str) -> LocalToolState:
         if not isinstance(packed, str) or not packed:
             raise ValueError("Capsule payload must be a non-empty string.")
-        return cls.model_validate_json(zlib.decompress(base64.b85decode(packed)))
+        if len(packed) > MAX_PACKED_SIZE:
+            raise ValueError("Capsule payload exceeds maximum packed size.")
+
+        compressed = base64.b85decode(packed)
+        raw = cls._decompress_with_limit(compressed)
+        return cls.model_validate_json(raw)
 
 
 def pack_tool_history(entries: Sequence[LocalToolEntry]) -> str:

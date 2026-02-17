@@ -20,7 +20,6 @@ class StreamState:
     pending_tool_calls: dict[str, ToolCallInfo] = field(default_factory=dict)
     local_pending_calls: dict[str, LocalToolEntry] = field(default_factory=dict)
     local_completed_entries: list[LocalToolEntry] = field(default_factory=list)
-    local_flushed_count: int = 0
 
     def add_thinking(self, content: str) -> None:
         """Add content to the thinking buffer."""
@@ -42,13 +41,10 @@ class StreamState:
         """Add a citation to the collection."""
         self.citations.append(citation)
 
-    def get_citations(self) -> list[Citation]:
-        """Get all collected citations."""
-        return self.citations.copy()
-
-    def clear_citations(self) -> None:
-        """Clear all citations."""
-        self.citations.clear()
+    def drain_citations(self) -> list[Citation]:
+        """Return and clear all collected citations."""
+        drained, self.citations = self.citations, []
+        return drained
 
     def has_citations(self) -> bool:
         """Check if any citations have been collected."""
@@ -102,10 +98,8 @@ class StreamState:
         self.local_completed_entries.append(entry)
 
     def drain_unflushed_local_entries(self) -> list[LocalToolEntry]:
-        """Return local entries not yet emitted into a capsule and mark flushed."""
-        if self.local_flushed_count >= len(self.local_completed_entries):
+        """Return all completed entries not yet emitted into a capsule."""
+        if not self.local_completed_entries:
             return []
-
-        entries = self.local_completed_entries[self.local_flushed_count :]
-        self.local_flushed_count = len(self.local_completed_entries)
-        return list(entries)
+        entries, self.local_completed_entries = self.local_completed_entries, []
+        return entries

@@ -45,11 +45,9 @@ _extraction_locks_guard = asyncio.Lock()
 async def _get_extraction_lock(key: str) -> asyncio.Lock:
     """Return (or create) an asyncio.Lock for the given document key."""
     async with _extraction_locks_guard:
-        lock = _extraction_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _extraction_locks[key] = lock
-        return lock
+        if key not in _extraction_locks:
+            _extraction_locks[key] = asyncio.Lock()
+        return _extraction_locks[key]
 
 
 # Type alias for data entry union
@@ -265,9 +263,7 @@ async def _extract_pdf_toc(content: str, filename: str) -> str | None:
 
     try:
         if _is_url(content):
-            # Determine a stable lock key from the source URL.
-            lock = await _get_extraction_lock(content)
-            async with lock:
+            async with await _get_extraction_lock(content):
                 source_hit = get_document_by_source(content)
                 if source_hit is not None:
                     doc_id, cached = source_hit
@@ -288,8 +284,7 @@ async def _extract_pdf_toc(content: str, filename: str) -> str | None:
                 return build_toc(cached, doc_id)
 
         expected_doc_id = _doc_id_from_base64(content)
-        lock = await _get_extraction_lock(expected_doc_id)
-        async with lock:
+        async with await _get_extraction_lock(expected_doc_id):
             cached = get_document(expected_doc_id)
             if cached is not None:
                 return build_toc(cached, expected_doc_id)

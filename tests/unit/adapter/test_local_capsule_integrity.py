@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import zlib
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -18,7 +20,10 @@ from openbb_pydantic_ai._config import (
     LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY,
 )
 from openbb_pydantic_ai._local_tool_capsule import (
+    MAX_PACKED_SIZE,
+    MAX_UNPACKED_SIZE,
     LocalToolEntry,
+    LocalToolState,
     pack_tool_history,
 )
 from openbb_pydantic_ai._widget_toolsets import build_widget_tool_name
@@ -35,6 +40,19 @@ class _RequestStub:
 
     async def body(self) -> bytes:
         return self._payload
+
+
+def test_unpack_rejects_payloads_over_max_packed_size() -> None:
+    oversized = "x" * (MAX_PACKED_SIZE + 1)
+    with pytest.raises(ValueError, match="maximum packed size"):
+        LocalToolState.unpack(oversized)
+
+
+def test_unpack_rejects_payloads_over_max_unpacked_size() -> None:
+    oversized_raw = b"x" * (MAX_UNPACKED_SIZE + 1)
+    packed = base64.b85encode(zlib.compress(oversized_raw)).decode("ascii")
+    with pytest.raises(ValueError, match="maximum unpacked size"):
+        LocalToolState.unpack(packed)
 
 
 def _deferred_pair(

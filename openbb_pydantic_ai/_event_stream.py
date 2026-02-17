@@ -744,9 +744,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield self._queued_viz_artifacts.popleft()
 
         # Emit all citations at the end
-        if self._state.has_citations():
-            yield citations(self._state.get_citations())
-            self._state.clear_citations()
+        drained_citations = self._state.drain_citations()
+        if drained_citations:
+            yield citations(drained_citations)
 
         if self._final_output and not self._has_streamed_text:
             for event in self._text_events_with_artifacts(self._final_output):

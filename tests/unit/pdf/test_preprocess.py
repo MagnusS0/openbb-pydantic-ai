@@ -233,3 +233,14 @@ async def test_preprocess_converts_embedded_pdf_json_and_registers_widget_aliase
     assert widget_id in aliases
     assert "c0ebd61e-39fa-4382-b82f-4374ea96a30f" in aliases
     assert widget_uuid in aliases
+
+
+async def test_get_extraction_lock_returns_same_lock_for_same_key() -> None:
+    pre._extraction_locks.clear()
+    key = "doc-key"
+
+    lock_a = await pre._get_extraction_lock(key)
+    lock_b = await pre._get_extraction_lock(key)
+
+    assert lock_a is lock_b
+    assert key in pre._extraction_locks
