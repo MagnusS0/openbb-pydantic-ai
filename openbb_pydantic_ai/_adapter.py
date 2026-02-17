@@ -269,7 +269,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         entries, capsule_key = self._decode_local_capsule(message)
         if entries is None or capsule_key is None or capsule_key in seen:
             return False
-        target.extend(await self._rehydrated_messages_from_entries(entries))
+        target.extend(self._rehydrated_messages_from_entries(entries))
         seen.add(capsule_key)
         return True
 
@@ -303,7 +303,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             )
             return None, None
 
-    async def _rehydrated_messages_from_entries(
+    def _rehydrated_messages_from_entries(
         self,
         entries: Sequence[LocalToolEntry],
     ) -> list[LlmMessage]:
