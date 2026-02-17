@@ -20,6 +20,11 @@ class StreamState:
     pending_tool_calls: dict[str, ToolCallInfo] = field(default_factory=dict)
     local_pending_calls: dict[str, LocalToolEntry] = field(default_factory=dict)
     local_completed_entries: list[LocalToolEntry] = field(default_factory=list)
+    has_streamed_text: bool = False
+
+    def record_text_streamed(self) -> None:
+        """Mark that at least one text chunk has been streamed."""
+        self.has_streamed_text = True
 
     def add_thinking(self, content: str) -> None:
         """Add content to the thinking buffer."""

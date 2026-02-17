@@ -76,6 +76,8 @@ from openbb_pydantic_ai._widget_registry import WidgetRegistry
 
 logger = logging.getLogger(__name__)
 
+_MAX_WIDGET_ARG_UNWRAP_DEPTH = 3
+
 
 def _encode_sse(event: SSE) -> str:
     payload = event.model_dump()
@@ -102,15 +104,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     _stream_parser: StreamParser = field(init=False, default_factory=StreamParser)
 
     # Simple state flags
-    _has_streamed_text: bool = field(init=False, default=False)
     _deferred_results_emitted: bool = field(init=False, default=False)
     _final_output: str | None = field(init=False, default=None)
 
     def encode_event(self, event: SSE) -> str:
         return _encode_sse(event)
-
-    def _record_text_streamed(self) -> None:
-        self._has_streamed_text = True
 
     async def before_stream(self) -> AsyncIterator[SSE]:
         """Emit tool results for any deferred results provided upfront."""
@@ -227,7 +225,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         for sse in handle_generic_tool_result(
             call_info,
             content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
         ):
             yield sse
 
@@ -345,8 +343,6 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         followed_by_thinking: bool = False,
     ) -> AsyncIterator[SSE]:
         content = part.content or self._state.get_thinking()
-        if not content and self._state.has_thinking():
-            content = self._state.get_thinking()
 
         if content:
             details = {EVENT_TYPE_THINKING: content}
@@ -371,7 +367,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield artifact
             return
 
-        if isinstance(output, str) and output and not self._has_streamed_text:
+        if isinstance(output, str) and output and not self._state.has_streamed_text:
             self._final_output = output
 
     @staticmethod
@@ -549,7 +545,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         if tool_name.startswith("openbb_widget_"):
             current = normalized
-            for _ in range(3):
+            for _ in range(_MAX_WIDGET_ARG_UNWRAP_DEPTH):
                 data_sources = current.get("data_sources")
                 if not isinstance(data_sources, list) or len(data_sources) != 1:
                     break
@@ -713,7 +709,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         for sse in handle_generic_tool_result(
             call_info,
             result_part.content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
         ):
             yield sse
 
@@ -736,8 +732,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             self._state.clear_thinking()
 
         # Flush any remaining text in the parser buffer
-        if self._has_streamed_text or self._final_output is None:
-            for event in self._stream_parser.flush(self._record_text_streamed):
+        if self._state.has_streamed_text or self._final_output is None:
+            for event in self._stream_parser.flush(self._state.record_text_streamed):
                 yield event
 
         while self._queued_viz_artifacts:
@@ -748,7 +744,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if drained_citations:
             yield citations(drained_citations)
 
-        if self._final_output and not self._has_streamed_text:
+        if self._final_output and not self._state.has_streamed_text:
             for event in self._text_events_with_artifacts(self._final_output):
                 yield event
 
@@ -762,7 +758,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         events = tool_result_events_from_content(
             content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
             widget_entries=widget_entries,
         )
         if events:
@@ -771,14 +767,15 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         return handle_generic_tool_result(
             call_info,
             content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
+            content_events=events,
         )
 
     def _text_events_with_artifacts(self, text: str) -> list[SSE]:
         return self._stream_parser.parse(
             text,
             self._artifact_generator(),
-            on_text_streamed=self._record_text_streamed,
+            on_text_streamed=self._state.record_text_streamed,
         )
 
     def _artifact_generator(self) -> Iterator[MessageArtifactSSE]:

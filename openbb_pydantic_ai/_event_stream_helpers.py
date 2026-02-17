@@ -99,6 +99,7 @@ def handle_generic_tool_result(
     content: Any,
     *,
     mark_streamed_text: TextStreamCallback,
+    content_events: list[SSE] | None = None,
 ) -> list[SSE]:
     """Emit SSE events for a non-widget tool result.
 
@@ -113,6 +114,9 @@ def handle_generic_tool_result(
         The tool result content to process
     mark_streamed_text : TextStreamCallback
         Callback to mark that text has been streamed
+    content_events : list[SSE] | None
+        Pre-computed result of ``tool_result_events_from_content``. When
+        provided the function skips calling it again.
 
     Returns
     -------
@@ -128,8 +132,12 @@ def handle_generic_tool_result(
             )
         ]
 
-    events = tool_result_events_from_content(
-        content, mark_streamed_text=mark_streamed_text
+    events = (
+        content_events
+        if content_events is not None
+        else tool_result_events_from_content(
+            content, mark_streamed_text=mark_streamed_text
+        )
     )
     if events:
         events.insert(0, reasoning_step(f"Tool '{info.tool_name}' returned"))
