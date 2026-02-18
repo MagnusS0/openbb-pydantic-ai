@@ -227,16 +227,16 @@ class MessageTransformer:
 
             if isinstance(data_sources, list) and len(data_sources) > 1:
                 counter = call_counters.get(function_name, 0)
-                for i, data_source in enumerate(data_sources):
-                    idx = counter + i
-                    if idx >= len(tool_call_ids):
-                        logger.warning(
-                            "Not enough tool_call_ids for batched call to %s",
-                            function_name,
-                        )
-                        return
+                required = len(data_sources)
+                if counter + required > len(tool_call_ids):
+                    logger.warning(
+                        "Not enough tool_call_ids for batched call to %s",
+                        function_name,
+                    )
+                    return
 
-                    tc_id = tool_call_ids[idx]
+                for i, data_source in enumerate(data_sources):
+                    tc_id = tool_call_ids[counter + i]
                     source_args: dict[str, Any] = {"data_sources": [data_source]}
                     rewritten_name, rewritten_args = self._rewrite_tool_call(
                         function_name, tc_id, source_args, tool_name_map
@@ -250,7 +250,7 @@ class MessageTransformer:
                         )
                     )
 
-                call_counters[function_name] = counter + len(data_sources)
+                call_counters[function_name] = counter + required
                 return
 
             counter = call_counters.get(function_name, 0)

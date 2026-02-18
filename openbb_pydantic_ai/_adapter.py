@@ -524,13 +524,16 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         self,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None,
     ) -> Sequence[AbstractToolset[OpenBBDeps]] | None:
-        if not self.enable_progressive_tool_discovery or not toolsets:
+        if not self.enable_progressive_tool_discovery:
             return toolsets
 
         # Clear previous runtime state to prevent accumulation across repeated calls
         self._runtime_progressive_toolsets = ()
         self._runtime_progressive_descriptions = {}
         self._invalidate_progressive_cache()
+
+        if not toolsets:
+            return toolsets
 
         # Compute used_group_ids from base toolsets only (runtime now cleared)
         used_group_ids = {group_id for group_id, _ in self._progressive_named_toolsets}
@@ -968,18 +971,14 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         on_complete: OnCompleteFunc[SSE] | None = None,
     ):
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
-        resolved_deps, toolsets, combined_instructions = self._resolve_stream_defaults(
-            deps=deps,
-            toolsets=toolsets,
-            instructions=instructions,
-        )
+        resolved_deps: OpenBBDeps = deps or self.deps
 
         return super().run_stream(
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
             model=model,
-            instructions=combined_instructions,
+            instructions=instructions,
             deps=resolved_deps,
             model_settings=model_settings,
             usage_limits=usage_limits,

@@ -8,7 +8,7 @@ from openbb_ai.models import (
     LlmClientMessage,
     RoleEnum,
 )
-from pydantic_ai.messages import TextPart, UserPromptPart
+from pydantic_ai.messages import TextPart, ToolCallPart, UserPromptPart
 
 from openbb_pydantic_ai._message_transformer import MessageTransformer
 
@@ -59,3 +59,60 @@ def test_transform_batch_skips_result_without_tool_call_id(caplog) -> None:
 
     assert transformed == []
     assert "Skipping result message for 'get_widget_data'" in caplog.text
+
+
+def test_transform_batch_skips_partial_batched_call_when_ids_missing(caplog) -> None:
+    batched_call = LlmClientMessage(
+        role=RoleEnum.ai,
+        content=LlmClientFunctionCall(
+            function="get_widget_data",
+            input_arguments={
+                "data_sources": [
+                    {"widget_uuid": "w1", "input_args": {"symbol": "AAPL"}},
+                    {"widget_uuid": "w1", "input_args": {"symbol": "MSFT"}},
+                    {"widget_uuid": "w1", "input_args": {"symbol": "NVDA"}},
+                ]
+            },
+        ),
+    )
+    batched_result = LlmClientFunctionCallResultMessage(
+        function="get_widget_data",
+        input_arguments={"data_sources": []},
+        data=[
+            ClientCommandResult(status="success", message="AAPL"),
+            ClientCommandResult(status="success", message="MSFT"),
+        ],
+        extra_state={
+            "tool_calls": [
+                {"tool_call_id": "id-a"},
+                {"tool_call_id": "id-b"},
+            ]
+        },
+    )
+    followup_call = LlmClientMessage(
+        role=RoleEnum.ai,
+        content=LlmClientFunctionCall(
+            function="get_widget_data",
+            input_arguments={
+                "data_sources": [
+                    {"widget_uuid": "w1", "input_args": {"symbol": "TSLA"}},
+                ]
+            },
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        transformed = MessageTransformer().transform_batch(
+            [batched_call, batched_result, followup_call]
+        )
+
+    calls = [
+        part
+        for message in transformed
+        for part in message.parts
+        if isinstance(part, ToolCallPart)
+    ]
+
+    assert "Not enough tool_call_ids for batched call to get_widget_data" in caplog.text
+    assert len(calls) == 1
+    assert calls[0].tool_call_id == "id-a"

@@ -198,6 +198,41 @@ async def test_runtime_toolset_routing(
         assert any(toolset is custom_tools for toolset in forwarded)
 
 
+async def test_runtime_progressive_toolsets_reset_when_runtime_toolsets_are_missing(
+    make_request,
+    agent_stream_stub,
+) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    custom_tools = FunctionToolset[OpenBBDeps](id="runtime_tools")
+
+    @custom_tools.tool
+    def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
+        _ = ctx
+        return f"Note for {symbol}"
+
+    add_to_progressive(
+        custom_tools,
+        group="runtime_tools_group",
+        description="Runtime-only toolset",
+    )
+
+    adapter = OpenBBAIAdapter(agent=agent_stream_stub, run_input=request)
+
+    first_stream = adapter.run_stream(toolsets=[custom_tools])
+    async for _ in first_stream:
+        pass
+
+    first_groups = {group_id for group_id, _ in adapter._progressive_named_toolsets}
+    assert "runtime_tools_group" in first_groups
+
+    second_stream = adapter.run_stream(toolsets=None)
+    async for _ in second_stream:
+        pass
+
+    second_groups = {group_id for group_id, _ in adapter._progressive_named_toolsets}
+    assert "runtime_tools_group" not in second_groups
+
+
 def test_execute_agent_tool_rewrite_uses_inner_parameters(make_request) -> None:
     mcp_tool_name = "equity_fundamental_income"
     wrapped_args = {
