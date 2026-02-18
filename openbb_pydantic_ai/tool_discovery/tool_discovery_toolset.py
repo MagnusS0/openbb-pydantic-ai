@@ -364,7 +364,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
         grouped: dict[str, list[tuple[str, str]]] = {}
         for name, tool in items:
             grouped.setdefault(tool.source_id, []).append(
-                (name, tool.description[:200])
+                (name, tool.description.split("\n", 1)[0][:200])
             )
 
         lines: list[str] = []
@@ -378,6 +378,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                 else:
                     lines.append(f"- {tool_name}")
             lines.append("")
+        lines.append("Next: call `get_tool_schema` with the tools you intend to use.")
         return "\n".join(lines).strip()
 
     async def _list_tools_impl(
@@ -619,7 +620,9 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             else:
                 lines.append(f'<group name="{group_id}" tool_count="{len(names)}">')
             for tool_name in sorted(names):
-                tool_desc = self._registry[tool_name].description[:120]
+                tool_desc = self._registry[tool_name].description.split("\n", 1)[0][
+                    :120
+                ]
                 lines.append(f'  <tool name="{tool_name}">{tool_desc}</tool>')
             lines.append("</group>")
 

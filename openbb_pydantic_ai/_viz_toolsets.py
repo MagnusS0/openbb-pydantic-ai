@@ -153,12 +153,22 @@ def _create_html(
     """
     Create an HTML artifact to display rich content inline.
 
+    Renders a self-contained HTML fragment inside the workspace. No JavaScript
+    is supported or executed — use CSS for layout and styling, and inline SVG
+    for charts, diagrams, and other graphics.
+
+    Rules:
+    - No <script> tags or event handlers (onclick, onload, etc.)
+    - Style with <style> blocks or inline `style` attributes (CSS only)
+    - Draw charts and visualisations with inline <svg> elements
+    - Keep all resources self-contained (no external URLs)
+
     Always requires:
-    - params.content: The HTML content to render
+    - content: The HTML content to render
 
     Optionally:
-    - params.name: Name for the artifact
-    - params.description: Description of the artifact
+    - name: Name for the artifact
+    - description: Description of the artifact
     """
     _ = ctx
     params = HtmlParams(content=content, name=name, description=description)

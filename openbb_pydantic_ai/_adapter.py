@@ -402,8 +402,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 if toolset is not None:
                     named.append((group_id, toolset))
 
-        named.append(("openbb_viz_tools", self._viz_toolset))
-
         mcp_toolsets = cast("Sequence[AbstractToolset[OpenBBDeps]]", self._mcp_toolsets)
         if len(mcp_toolsets) == 1:
             named.append(("openbb_mcp_tools", mcp_toolsets[0]))
@@ -422,7 +420,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             "openbb_widgets_primary": "Primary dashboard widget tools",
             "openbb_widgets_secondary": "Secondary dashboard widget tools",
             "openbb_widgets_extra": "Additional dashboard widget tools",
-            "openbb_viz_tools": "OpenBB table/chart/html artifact tools",
             "openbb_mcp_tools": "Workspace-selected MCP tools",
         }
         for group_id, _toolset in self._progressive_named_toolsets:
@@ -746,18 +743,19 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         if not self._toolsets:
             return None
         if self.enable_progressive_tool_discovery:
-            if self._pdf_toolset is None:
-                return cast(AbstractToolset[OpenBBDeps], self._progressive_toolset)
-
-            # Keep PDF query available as a direct tool while other OpenBB tools
-            # use progressive discovery.
-            combined_progressive = CombinedToolset(
-                cast(
-                    "Sequence[AbstractToolset[None]]",
-                    (self._progressive_toolset, self._pdf_toolset),
-                )
+            # Viz and PDF are direct native tools, not wrapped inside call_tools.
+            direct: list[AbstractToolset[OpenBBDeps]] = [
+                self._progressive_toolset,
+                self._viz_toolset,
+            ]
+            if self._pdf_toolset is not None:
+                direct.append(self._pdf_toolset)
+            if len(direct) == 1:
+                return cast(AbstractToolset[OpenBBDeps], direct[0])
+            return cast(
+                AbstractToolset[OpenBBDeps],
+                CombinedToolset(cast("Sequence[AbstractToolset[None]]", direct)),
             )
-            return cast(AbstractToolset[OpenBBDeps], combined_progressive)
         if len(self._toolsets) == 1:
             return self._toolsets[0]
         combined = CombinedToolset(
