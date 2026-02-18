@@ -1,0 +1,21 @@
+[project]
+name = "openbb-pydantic-ai-examples"
+version = "0.0.0"
+description = "Example agents using openbb-pydantic-ai"
+requires-python = ">=3.10"
+dependencies = [
+    "openbb-pydantic-ai",
+    "pydantic-ai-slim[openai]",
+    "pydantic-ai-skills",
+    "fastapi>=0.129.0",
+    "uvicorn>=0.40.0",
+    "orjson>=3.11.7",
+]
+
+[project.optional-dependencies]
+observability = [
+    "pydantic-ai-slim[logfire]",
+]
+
+[tool.uv.sources]
+openbb-pydantic-ai = { workspace = true }
