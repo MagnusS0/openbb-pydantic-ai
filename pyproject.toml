@@ -40,6 +40,9 @@ dev = [
     "ty>=0.0.2",
 ]
 
+[tool.uv.workspace]
+members = ["examples"]
+
 [tool.uv]
 conflicts = [
     [
@@ -77,6 +80,9 @@ build-backend = "uv_build"
 module-name = "openbb_pydantic_ai"
 module-root = ""
 
+[tool.ruff]
+exclude = ["examples"]
+
 [tool.ruff.lint]
 select = [
     "E", # pycodestyle
@@ -99,4 +105,4 @@ markers = [
 asyncio_mode = "auto"
 
 [tool.ty.src]
-exclude = ["tests/smoke/test_distribution.py"]
+exclude = ["tests/smoke/test_distribution.py", "examples/"]
