@@ -10,7 +10,6 @@ import asyncio
 import base64
 import binascii
 import hashlib
-import json
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -24,6 +23,7 @@ from openbb_ai.models import (
     SingleDataContent,
     SingleFileReference,
 )
+from pydantic_core import from_json as _from_json
 
 from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
 from openbb_pydantic_ai.pdf._graph import build_toc
@@ -162,15 +162,15 @@ def _find_pdf_sources(
     in practice).
     """
     try:
-        parsed = json.loads(raw_content)
-    except (TypeError, ValueError):
+        parsed = _from_json(raw_content)
+    except ValueError:
         return []
 
     # Handle double-encoded JSON strings
     if isinstance(parsed, str):
         try:
-            parsed = json.loads(parsed)
-        except (TypeError, ValueError):
+            parsed = _from_json(parsed)
+        except ValueError:
             return []
 
     results: dict[str, tuple[str, str, set[str]]] = {}

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
@@ -18,6 +17,7 @@ from openbb_ai.models import (
     StatusUpdateSSEData,
     Widget,
 )
+from pydantic_core import from_json as _from_json
 
 from openbb_pydantic_ai._viz_toolsets import _html_artifact
 
@@ -531,9 +531,9 @@ def _parse_item_content(
 ) -> tuple[Any, StatusUpdateSSE | None]:
     """Parse raw content string into structured data or return an error event."""
     try:
-        parsed = _decode_nested_json(json.loads(raw_content))
+        parsed = _decode_nested_json(_from_json(raw_content))
         return parsed, None
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         error_messages = _extract_error_messages(raw_content)
         if error_messages:
             return None, StatusUpdateSSE(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections import deque
 from collections.abc import AsyncIterator, Iterator, Mapping
@@ -44,6 +43,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.ui import UIEventStream
+from pydantic_core import to_json as _pydantic_to_json
 
 from openbb_pydantic_ai._config import (
     CHART_TOOL_NAME,
@@ -80,8 +80,8 @@ _MAX_WIDGET_ARG_UNWRAP_DEPTH = 3
 
 
 def _encode_sse(event: SSE) -> str:
-    payload = event.model_dump()
-    return f"event: {payload['event']}\ndata: {payload['data']}\n\n"
+    data = event.data.model_dump_json(exclude_none=True)
+    return f"event: {event.event}\ndata: {data}\n\n"
 
 
 @dataclass
@@ -621,7 +621,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 message = (
                     content
                     if isinstance(content, str)
-                    else json.dumps(content, default=str)
+                    else _pydantic_to_json(content, serialize_unknown=True).decode()
                 )
                 yield reasoning_step(message, event_type=EVENT_TYPE_ERROR)
             return

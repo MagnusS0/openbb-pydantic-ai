@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
-from pydantic import BaseModel, Field
+from pydantic import BeforeValidator, Field
 from pydantic_ai import ToolReturn
 from pydantic_ai.exceptions import CallDeferred, ModelRetry
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
+from pydantic_core import from_json as _from_json
+from pydantic_core import to_json
 
 if TYPE_CHECKING:
     from pydantic_ai import ToolsetTool
@@ -27,11 +28,27 @@ _MISSING_TOOL_GUIDANCE = (
 )
 
 
-class _ToolCallSpec(BaseModel):
-    """Structured schema for a single call_tools entry."""
+def _coerce_calls(v: Any) -> Any:
+    """Coerce calls argument: parse JSON strings and wrap bare dicts in a list."""
+    if isinstance(v, str):
+        try:
+            v = _from_json(v)
+            if isinstance(v, str):
+                # Handle accidental double-encoding: string -> JSON string -> list.
+                v = _from_json(v)
+        except Exception:
+            raise ValueError(
+                "calls must be a list, not a JSON-encoded string. "
+                'Pass: calls=[{"tool_name":"...","arguments":{...}}] directly.'
+            ) from None
+    if isinstance(v, dict):
+        return [v]
+    return v
 
-    tool_name: str = Field(min_length=1)
-    arguments: dict[str, Any] = Field(default_factory=dict)
+
+_CallsList = Annotated[
+    list[dict[str, Any]], BeforeValidator(_coerce_calls), Field(min_length=1)
+]
 
 
 _DEFAULT_INSTRUCTIONS = """\
@@ -269,7 +286,7 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             @self.tool(retries=2)
             async def call_tools(
                 ctx: RunContext[Any],
-                calls: Annotated[list[_ToolCallSpec], Field(min_length=1)],
+                calls: _CallsList,
             ) -> Any:
                 """Execute one or more tools.
 
@@ -287,13 +304,11 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
                     `ToolReturn` for single-call metadata-preserving tool
                     responses, or a markdown summary grouped by tool invocation.
                 """
-                return await self._call_tools_impl(
-                    ctx, [call.model_dump() for call in calls]
-                )
+                return await self._call_tools_impl(ctx, calls)
 
     @staticmethod
     def _json_compact(value: Any) -> str:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return to_json(value).decode()
 
     @staticmethod
     def _tool_result_to_text(value: Any) -> str:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, cast
 
 from openbb_ai.models import LlmClientFunctionCallResultMessage
+from pydantic_core import from_json as _from_json
+from pydantic_core import to_json as _pydantic_to_json
+from pydantic_core import to_jsonable_python
 
 from openbb_pydantic_ai._types import SerializedContent
 
@@ -27,10 +29,7 @@ def serialize_result(
         optionally extra_state
     """
     data: list[Any] = [
-        item.model_dump(mode="json", exclude_none=True)
-        if hasattr(item, "model_dump")
-        else item
-        for item in message.data
+        to_jsonable_python(item, exclude_none=True) for item in message.data
     ]
 
     content: SerializedContent = cast(
@@ -59,8 +58,8 @@ def parse_json(raw_content: str) -> Any:
         Parsed JSON object or original string if parsing fails
     """
     try:
-        return json.loads(raw_content)
-    except (json.JSONDecodeError, ValueError):
+        return _from_json(raw_content, cache_strings="keys")
+    except ValueError:
         return raw_content
 
 
@@ -82,8 +81,8 @@ def to_string(content: Any) -> str | None:
     if isinstance(content, str):
         return content
     try:
-        return json.dumps(content, default=str)
-    except (TypeError, ValueError):
+        return _pydantic_to_json(content, serialize_unknown=True).decode()
+    except Exception:
         return str(content)
 
 
@@ -101,6 +100,6 @@ def to_json(value: Any) -> str:
         JSON string representation
     """
     try:
-        return json.dumps(value, default=str)
-    except (TypeError, ValueError):
+        return _pydantic_to_json(value, serialize_unknown=True).decode()
+    except Exception:
         return str(value)
