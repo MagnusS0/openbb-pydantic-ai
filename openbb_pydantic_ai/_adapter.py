@@ -750,8 +750,6 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             ]
             if self._pdf_toolset is not None:
                 direct.append(self._pdf_toolset)
-            if len(direct) == 1:
-                return cast(AbstractToolset[OpenBBDeps], direct[0])
             return cast(
                 AbstractToolset[OpenBBDeps],
                 CombinedToolset(cast("Sequence[AbstractToolset[None]]", direct)),
