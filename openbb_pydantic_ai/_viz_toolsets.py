@@ -41,7 +41,18 @@ class ChartParams(BaseModel):
         return self
 
 
-def _create_chart(ctx: RunContext[OpenBBDeps], params: ChartParams) -> ToolReturn:
+def _create_chart(
+    ctx: RunContext[OpenBBDeps],
+    *,
+    type: Literal["line", "bar", "scatter", "pie", "donut"],
+    data: list[dict[str, Any]],
+    x_key: str | None = None,
+    y_keys: list[str] | None = None,
+    angle_key: str | None = None,
+    callout_label_key: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+) -> ToolReturn:
     """
     Create a chart artifact (line, bar, scatter, pie, donut).
 
@@ -52,6 +63,18 @@ def _create_chart(ctx: RunContext[OpenBBDeps], params: ChartParams) -> ToolRetur
     - type: Chart type (line, bar, scatter, pie, donut)
     - data: List of data points (dictionaries)
     """
+    _ = ctx
+    params = ChartParams(
+        type=type,
+        data=data,
+        x_key=x_key,
+        y_keys=y_keys,
+        angle_key=angle_key,
+        callout_label_key=callout_label_key,
+        name=name,
+        description=description,
+    )
+
     return ToolReturn(
         return_value="Chart created successfully.",
         metadata={
@@ -71,6 +94,7 @@ def _create_chart(ctx: RunContext[OpenBBDeps], params: ChartParams) -> ToolRetur
 
 def _create_table(
     ctx: RunContext[OpenBBDeps],
+    *,
     data: list[dict[Any, Any]],
     name: str | None = None,
     description: str | None = None,
@@ -121,18 +145,34 @@ def _html_artifact(
 
 def _create_html(
     ctx: RunContext[OpenBBDeps],
-    params: HtmlParams,
+    *,
+    content: str,
+    name: str | None = None,
+    description: str | None = None,
 ) -> ToolReturn:
     """
     Create an HTML artifact to display rich content inline.
 
+    Renders a self-contained HTML fragment inside the workspace. No JavaScript
+    is supported or executed — use CSS for layout and styling, and inline SVG
+    for charts, diagrams, and other graphics.
+
+    Rules:
+    - No <script> tags or event handlers (onclick, onload, etc.)
+    - Style with <style> blocks or inline `style` attributes (CSS only)
+    - Draw charts and visualisations with inline <svg> elements
+    - Keep all resources self-contained (no external URLs)
+
     Always requires:
-    - params.content: The HTML content to render
+    - content: The HTML content to render
 
     Optionally:
-    - params.name: Name for the artifact
-    - params.description: Description of the artifact
+    - name: Name for the artifact
+    - description: Description of the artifact
     """
+    _ = ctx
+    params = HtmlParams(content=content, name=name, description=description)
+
     return ToolReturn(
         return_value="HTML artifact created successfully.",
         metadata={

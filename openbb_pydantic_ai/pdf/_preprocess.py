@@ -10,7 +10,6 @@ import asyncio
 import base64
 import binascii
 import hashlib
-import json
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -24,6 +23,7 @@ from openbb_ai.models import (
     SingleDataContent,
     SingleFileReference,
 )
+from pydantic_core import from_json as _from_json
 
 from openbb_pydantic_ai._config import GET_WIDGET_DATA_TOOL_NAME
 from openbb_pydantic_ai.pdf._graph import build_toc
@@ -45,11 +45,9 @@ _extraction_locks_guard = asyncio.Lock()
 async def _get_extraction_lock(key: str) -> asyncio.Lock:
     """Return (or create) an asyncio.Lock for the given document key."""
     async with _extraction_locks_guard:
-        lock = _extraction_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _extraction_locks[key] = lock
-        return lock
+        if key not in _extraction_locks:
+            _extraction_locks[key] = asyncio.Lock()
+        return _extraction_locks[key]
 
 
 # Type alias for data entry union
@@ -126,12 +124,7 @@ def _message_aliases_for_data_index(
         return set()
 
     selected: list[dict[str, Any]] = []
-    if data_count == len(data_sources):
-        if data_index < len(data_sources) and isinstance(
-            data_sources[data_index], dict
-        ):
-            selected.append(data_sources[data_index])
-    elif data_count == 1:
+    if data_count == 1:
         selected.extend(s for s in data_sources if isinstance(s, dict))
     elif data_index < len(data_sources) and isinstance(data_sources[data_index], dict):
         selected.append(data_sources[data_index])
@@ -169,15 +162,15 @@ def _find_pdf_sources(
     in practice).
     """
     try:
-        parsed = json.loads(raw_content)
-    except (TypeError, ValueError):
+        parsed = _from_json(raw_content)
+    except ValueError:
         return []
 
     # Handle double-encoded JSON strings
     if isinstance(parsed, str):
         try:
-            parsed = json.loads(parsed)
-        except (TypeError, ValueError):
+            parsed = _from_json(parsed)
+        except ValueError:
             return []
 
     results: dict[str, tuple[str, str, set[str]]] = {}
@@ -270,9 +263,7 @@ async def _extract_pdf_toc(content: str, filename: str) -> str | None:
 
     try:
         if _is_url(content):
-            # Determine a stable lock key from the source URL.
-            lock = await _get_extraction_lock(content)
-            async with lock:
+            async with await _get_extraction_lock(content):
                 source_hit = get_document_by_source(content)
                 if source_hit is not None:
                     doc_id, cached = source_hit
@@ -293,8 +284,7 @@ async def _extract_pdf_toc(content: str, filename: str) -> str | None:
                 return build_toc(cached, doc_id)
 
         expected_doc_id = _doc_id_from_base64(content)
-        lock = await _get_extraction_lock(expected_doc_id)
-        async with lock:
+        async with await _get_extraction_lock(expected_doc_id):
             cached = get_document(expected_doc_id)
             if cached is not None:
                 return build_toc(cached, expected_doc_id)

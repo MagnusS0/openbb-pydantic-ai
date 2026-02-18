@@ -46,9 +46,31 @@ def test_find_widget_for_get_widget_data_sources(sample_widget: Widget) -> None:
 
 
 @pytest.mark.parametrize(
-    ("input_args", "expected"),
+    "input_args",
+    [
+        {"data_sources": ["not_a_mapping"]},
+        {"data_sources": [{"widget_uuid": 123}]},
+        {"data_sources": [{"widget_uuid": None}]},
+    ],
+)
+def test_find_widget_for_get_widget_data_ignores_invalid_sources(
+    sample_widget: Widget,
+    input_args: dict[str, Any],
+) -> None:
+    widget = sample_widget
+    message = result_message(GET_WIDGET_DATA_TOOL_NAME, input_args)
+
+    registry = WidgetRegistry()
+    registry._by_uuid[str(widget.uuid)] = widget
+
+    assert registry.find_for_result(message) is None
+
+
+@pytest.mark.parametrize(
+    ("function", "input_args", "expected"),
     [
         (
+            GET_WIDGET_DATA_TOOL_NAME,
             {
                 "data_sources": [
                     {
@@ -59,14 +81,29 @@ def test_find_widget_for_get_widget_data_sources(sample_widget: Widget) -> None:
             },
             {"symbol": "TSLA"},
         ),
-        ({"symbol": "NVDA"}, {"symbol": "NVDA"}),
+        (
+            "openbb_widget_quote",
+            {"symbol": "NVDA"},
+            {"symbol": "NVDA"},
+        ),
+        (GET_WIDGET_DATA_TOOL_NAME, {"data_sources": ["not_a_mapping"]}, {}),
+        (GET_WIDGET_DATA_TOOL_NAME, {"data_sources": [{"input_args": "bad"}]}, {}),
+        (GET_WIDGET_DATA_TOOL_NAME, {"data_sources": [{}]}, {}),
     ],
-    ids=["prefers_data_sources", "falls_back_to_result_arguments"],
+    ids=[
+        "prefers_data_sources",
+        "falls_back_to_result_arguments",
+        "rejects_non_mapping_data_source",
+        "rejects_non_mapping_input_args",
+        "rejects_missing_input_args",
+    ],
 )
 def test_extract_widget_args(
-    input_args: dict[str, Any], expected: dict[str, str]
+    function: str,
+    input_args: dict[str, Any],
+    expected: dict[str, Any],
 ) -> None:
-    message = result_message(GET_WIDGET_DATA_TOOL_NAME, input_args)
+    message = result_message(function, input_args)
 
     extracted = extract_widget_args(message)
 

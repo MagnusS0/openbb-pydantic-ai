@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
+from collections import deque
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,10 +38,12 @@ from pydantic_ai.messages import (
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
+    ToolCallPart,
     ToolReturnPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.ui import UIEventStream
+from pydantic_core import to_json as _pydantic_to_json
 
 from openbb_pydantic_ai._config import (
     CHART_TOOL_NAME,
@@ -51,30 +53,35 @@ from openbb_pydantic_ai._config import (
     EXECUTE_MCP_TOOL_NAME,
     GET_WIDGET_DATA_TOOL_NAME,
     HTML_TOOL_NAME,
+    LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY,
     PDF_QUERY_TOOL_NAME,
     TABLE_TOOL_NAME,
 )
 from openbb_pydantic_ai._dependencies import OpenBBDeps
 from openbb_pydantic_ai._event_stream_components import StreamState
+from openbb_pydantic_ai._event_stream_formatters import _format_meta_tool_call_args
 from openbb_pydantic_ai._event_stream_helpers import (
     ToolCallInfo,
     artifact_from_output,
     extract_widget_args,
     handle_generic_tool_result,
-    serialized_content_from_result,
     tool_result_events_from_content,
 )
+from openbb_pydantic_ai._local_tool_capsule import pack_tool_history
 from openbb_pydantic_ai._pdf_preprocess import preprocess_pdf_in_results
+from openbb_pydantic_ai._serializers import serialize_result
 from openbb_pydantic_ai._stream_parser import StreamParser
 from openbb_pydantic_ai._utils import format_args, normalize_args
 from openbb_pydantic_ai._widget_registry import WidgetRegistry
 
 logger = logging.getLogger(__name__)
 
+_MAX_WIDGET_ARG_UNWRAP_DEPTH = 3
+
 
 def _encode_sse(event: SSE) -> str:
-    payload = event.model_dump()
-    return f"event: {payload['event']}\ndata: {payload['data']}\n\n"
+    data = event.data.model_dump_json(exclude_none=True)
+    return f"event: {event.event}\ndata: {data}\n\n"
 
 
 @dataclass
@@ -87,24 +94,21 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         default_factory=list
     )
     mcp_tools: Mapping[str, AgentTool] | None = None
+    enable_local_tool_history_capsule: bool = True
 
     # State management components
     _state: StreamState = field(init=False, default_factory=StreamState)
-    _queued_viz_artifacts: list[MessageArtifactSSE] = field(
-        init=False, default_factory=list
+    _queued_viz_artifacts: deque[MessageArtifactSSE] = field(
+        init=False, default_factory=deque
     )
     _stream_parser: StreamParser = field(init=False, default_factory=StreamParser)
 
     # Simple state flags
-    _has_streamed_text: bool = field(init=False, default=False)
     _deferred_results_emitted: bool = field(init=False, default=False)
     _final_output: str | None = field(init=False, default=None)
 
     def encode_event(self, event: SSE) -> str:
         return _encode_sse(event)
-
-    def _record_text_streamed(self) -> None:
-        self._has_streamed_text = True
 
     async def before_stream(self) -> AsyncIterator[SSE]:
         """Emit tool results for any deferred results provided upfront."""
@@ -131,7 +135,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             return
 
         widget_entries = self._widget_entries_from_result(result_message)
-        content = serialized_content_from_result(result_message)
+        content = serialize_result(result_message)
 
         for idx, (widget, widget_args) in enumerate(widget_entries, start=1):
             if widget is not None:
@@ -139,7 +143,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 citation = cite(
                     widget,
                     widget_args,
-                    extra_details=citation_details if citation_details else None,
+                    extra_details=citation_details or None,
                 )
                 enriched = self._enrich_citation(widget, citation)
                 self._state.add_citation(enriched)
@@ -147,13 +151,10 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
             details = format_args(widget_args)
             suffix = f" #{idx}" if len(widget_entries) > 1 else ""
-            message = (
-                f"Received result{suffix} for '{result_message.function}' "
-                "without widget metadata"
-            )
             yield reasoning_step(
-                message,
-                details=details if details else None,
+                f"Received result{suffix} for '{result_message.function}' "
+                "without widget metadata",
+                details=details or None,
                 event_type=EVENT_TYPE_WARNING,
             )
 
@@ -163,17 +164,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield reasoning_step(f"PDF — {text_label} returned")
             return
 
-        primary_widget: Widget | None = None
-        primary_args: dict[str, Any] = {}
-        if widget_entries:
-            primary_widget = widget_entries[0][0]
-            primary_args = widget_entries[0][1]
-
-        call_args = primary_args if len(widget_entries) == 1 else {}
+        is_single = len(widget_entries) == 1
         call_info = ToolCallInfo(
             tool_name=result_message.function,
-            args=call_args,
-            widget=primary_widget if len(widget_entries) == 1 else None,
+            args=widget_entries[0][1] if is_single else {},
+            widget=widget_entries[0][0] if is_single else None,
         )
 
         for event in self._widget_result_events(
@@ -226,11 +221,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             args=args,
             agent_tool=agent_tool,
         )
-        content = serialized_content_from_result(result_message)
+        content = serialize_result(result_message)
         for sse in handle_generic_tool_result(
             call_info,
             content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
         ):
             yield sse
 
@@ -273,6 +268,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         tool_call_id: str,
         agent_tool: AgentTool,
         args: dict[str, Any],
+        capsule_payload: str | None = None,
     ) -> FunctionCallSSE:
         server_identifier = agent_tool.server_id or agent_tool.url
         input_arguments: dict[str, Any] = {
@@ -292,8 +288,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     "tool_name": agent_tool.name,
                     "server_id": server_identifier,
                 }
-            ]
+            ],
+            "persist_tool_result": True,
         }
+        if capsule_payload is not None:
+            extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY] = capsule_payload
 
         return FunctionCallSSE(
             data=FunctionCallSSEData(
@@ -326,9 +325,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         self._state.clear_thinking()
         if part.content:
             self._state.add_thinking(part.content)
-        # yield needed to make this an async generator
-        if False:
-            yield
+        if False:  # pragma: no cover
+            yield reasoning_step("")
 
     async def handle_thinking_delta(
         self,
@@ -336,9 +334,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     ) -> AsyncIterator[SSE]:
         if delta.content_delta:
             self._state.add_thinking(delta.content_delta)
-        # yield needed to make this an async generator
-        if False:
-            yield
+        if False:  # pragma: no cover
+            yield reasoning_step("")
 
     async def handle_thinking_end(
         self,
@@ -346,8 +343,6 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         followed_by_thinking: bool = False,
     ) -> AsyncIterator[SSE]:
         content = part.content or self._state.get_thinking()
-        if not content and self._state.has_thinking():
-            content = self._state.get_thinking()
 
         if content:
             details = {EVENT_TYPE_THINKING: content}
@@ -367,13 +362,69 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 yield sse_event
             return
 
-        artifact = self._artifact_from_output(output)
+        artifact = artifact_from_output(output)
         if artifact is not None:
             yield artifact
             return
 
-        if isinstance(output, str) and output and not self._has_streamed_text:
+        if isinstance(output, str) and output and not self._state.has_streamed_text:
             self._final_output = output
+
+    @staticmethod
+    def _expand_deferred_calls(
+        output: DeferredToolRequests,
+    ) -> list[ToolCallPart]:
+        """Expand ``call_tools`` wrapper entries into individual calls.
+
+        When progressive discovery is active, the graph defers the
+        ``call_tools`` meta-tool itself.  The actual nested tool calls
+        are stored in ``DeferredToolRequests.metadata`` under the
+        ``deferred_calls`` key.  This helper expands those entries into
+        individual ``ToolCallPart`` instances so downstream handling
+        works identically to the non-progressive path.
+        """
+        expanded: list[ToolCallPart] = []
+        for call in output.calls:
+            if call.tool_name != "call_tools":
+                expanded.append(call)
+                continue
+
+            # Check metadata first (populated by CallDeferred).
+            meta = (output.metadata or {}).get(call.tool_call_id)
+            nested: list[dict[str, Any]] | None = None
+            if isinstance(meta, dict):
+                nested = meta.get("deferred_calls")
+
+            # Fallback: extract from the call args directly.
+            if not nested:
+                raw_args = normalize_args(call.args)
+                raw_calls = raw_args.get("calls")
+                if isinstance(raw_calls, dict):
+                    nested = [raw_calls]
+                elif isinstance(raw_calls, list):
+                    nested = raw_calls
+
+            if not nested:
+                expanded.append(call)
+                continue
+
+            for idx, entry in enumerate(nested):
+                if not isinstance(entry, dict):
+                    continue
+                tool_name = entry.get("tool_name")
+                if not isinstance(tool_name, str) or not tool_name:
+                    continue
+                # Derive a stable tool_call_id from the parent call plus index
+                derived_id = f"{call.tool_call_id}-{idx}"
+                expanded.append(
+                    ToolCallPart(
+                        tool_name=tool_name,
+                        args=entry.get("arguments") or {},
+                        tool_call_id=derived_id,
+                    )
+                )
+
+        return expanded
 
     async def _handle_deferred_tool_requests(
         self, output: DeferredToolRequests
@@ -382,31 +433,40 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         widget_requests: list[WidgetRequest] = []
         tool_call_ids: list[dict[str, Any]] = []
         mcp_requests: list[tuple[str, AgentTool, dict[str, Any]]] = []
+        capsule_payload = self._build_local_tool_capsule_payload()
+        capsule_attached = False
 
-        for call in output.calls:
-            widget = self.widget_registry.find_by_tool_name(call.tool_name)
+        expanded_calls = self._expand_deferred_calls(output)
+
+        for call in expanded_calls:
+            raw_args = normalize_args(call.args)
+            effective_tool_name, effective_args = self._extract_effective_tool_call(
+                call.tool_name, raw_args
+            )
+
+            widget = self.widget_registry.find_by_tool_name(effective_tool_name)
             if widget is None:
-                agent_tool = self._find_agent_tool(call.tool_name)
+                agent_tool = self._find_agent_tool(effective_tool_name)
                 if agent_tool is None:
                     continue
 
-                args = normalize_args(call.args)
                 self._state.register_tool_call(
                     tool_call_id=call.tool_call_id,
-                    tool_name=call.tool_name,
-                    args=args,
+                    tool_name=effective_tool_name,
+                    args=effective_args,
                     agent_tool=agent_tool,
                 )
 
-                mcp_requests.append((call.tool_call_id, agent_tool, args))
+                mcp_requests.append((call.tool_call_id, agent_tool, effective_args))
                 continue
 
-            args = normalize_args(call.args)
-            widget_requests.append(WidgetRequest(widget=widget, input_arguments=args))
+            widget_requests.append(
+                WidgetRequest(widget=widget, input_arguments=effective_args)
+            )
             self._state.register_tool_call(
                 tool_call_id=call.tool_call_id,
-                tool_name=call.tool_name,
-                args=args,
+                tool_name=effective_tool_name,
+                args=effective_args,
                 widget=widget,
             )
             tool_call_ids.append(
@@ -414,6 +474,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     "tool_call_id": call.tool_call_id,
                     "widget_uuid": str(widget.uuid),
                     "widget_id": widget.widget_id,
+                    "tool_name": effective_tool_name,
                 }
             )
 
@@ -421,7 +482,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             details = {
                 "Origin": widget.origin,
                 "Widget Id": widget.widget_id,
-                **format_args(args),
+                **format_args(effective_args),
             }
             yield reasoning_step(
                 f"Requesting widget '{widget.name}'",
@@ -430,7 +491,14 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         if widget_requests:
             sse = get_widget_data(widget_requests)
-            sse.data.extra_state = {"tool_calls": tool_call_ids}
+            extra_state: dict[str, Any] = {
+                "tool_calls": tool_call_ids,
+                "persist_tool_result": True,
+            }
+            if capsule_payload is not None:
+                extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY] = capsule_payload
+                capsule_attached = True
+            sse.data.extra_state = extra_state
             yield sse
 
         for tool_call_id, agent_tool, args in mcp_requests:
@@ -438,19 +506,70 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 tool_call_id=tool_call_id,
                 agent_tool=agent_tool,
                 args=args,
+                capsule_payload=capsule_payload if not capsule_attached else None,
             )
+            capsule_attached = True
 
-    def _build_mcp_call_info(
-        self, tool_name: str | None, args: dict[str, Any]
-    ) -> ToolCallInfo:
-        agent_tool = (
-            self._find_agent_tool(tool_name) if tool_name and self.mcp_tools else None
+    @staticmethod
+    def _extract_effective_tool_call(
+        tool_name: str, args: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """Map meta `call_tools(...)` invocations to the nested target tool."""
+        if tool_name != "call_tools":
+            return tool_name, OpenBBAIEventStream._normalize_tool_args(tool_name, args)
+
+        calls = args.get("calls")
+        if not isinstance(calls, list) or len(calls) != 1:
+            return tool_name, args
+
+        entry = calls[0]
+        if not isinstance(entry, dict):
+            return tool_name, args
+
+        nested_name = entry.get("tool_name")
+        if not isinstance(nested_name, str) or not nested_name:
+            return tool_name, args
+
+        nested_args = entry.get("arguments", {})
+        if not isinstance(nested_args, dict):
+            nested_args = {}
+
+        return nested_name, OpenBBAIEventStream._normalize_tool_args(
+            nested_name, normalize_args(nested_args)
         )
-        return ToolCallInfo(
-            tool_name=tool_name or EXECUTE_MCP_TOOL_NAME,
-            args=args,
-            agent_tool=agent_tool,
-        )
+
+    @staticmethod
+    def _normalize_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Normalize widget and MCP transport envelopes for nested tool calls."""
+        normalized = normalize_args(args)
+
+        if tool_name.startswith("openbb_widget_"):
+            current = normalized
+            for _ in range(_MAX_WIDGET_ARG_UNWRAP_DEPTH):
+                data_sources = current.get("data_sources")
+                if not isinstance(data_sources, list) or len(data_sources) != 1:
+                    break
+                first = data_sources[0]
+                if not isinstance(first, dict):
+                    break
+                inner = first.get("input_args")
+                if not isinstance(inner, dict):
+                    break
+                current = inner
+            normalized = normalize_args(current)
+
+        nested = normalized.get("parameters")
+        if not isinstance(nested, dict):
+            return normalized
+
+        nested_tool_name = normalized.get("tool_name")
+        if not isinstance(nested_tool_name, str) or nested_tool_name != tool_name:
+            return normalized
+
+        if not any(key in normalized for key in ("server_id", "url", "endpoint")):
+            return normalized
+
+        return normalize_args(nested)
 
     async def handle_function_tool_call(
         self, event: FunctionToolCallEvent
@@ -460,24 +579,36 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         part = event.part
         tool_name = part.tool_name
 
-        is_widget_call = self.widget_registry.find_by_tool_name(tool_name)
-        if is_widget_call or tool_name == GET_WIDGET_DATA_TOOL_NAME:
+        raw_args = normalize_args(part.args)
+        effective_tool_name, effective_args = self._extract_effective_tool_call(
+            tool_name, raw_args
+        )
+
+        is_widget_call = self.widget_registry.find_by_tool_name(effective_tool_name)
+        if is_widget_call or effective_tool_name == GET_WIDGET_DATA_TOOL_NAME:
             return
 
         tool_call_id = part.tool_call_id
         if not tool_call_id or self._state.has_tool_call(tool_call_id):
             return
 
-        args = normalize_args(part.args)
         self._state.register_tool_call(
             tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            args=args,
+            tool_name=effective_tool_name,
+            args=effective_args,
+        )
+        self._state.register_local_tool_call(
+            tool_call_id=tool_call_id,
+            tool_name=effective_tool_name,
+            args=effective_args,
         )
 
-        formatted_args = format_args(args)
-        details = formatted_args if formatted_args else None
-        yield reasoning_step(f"Calling tool '{tool_name}'", details=details)
+        details: dict[str, Any] | None = (
+            _format_meta_tool_call_args(effective_tool_name, effective_args)
+            or format_args(effective_args)
+            or None
+        )
+        yield reasoning_step(f"Calling tool '{effective_tool_name}'", details=details)
 
     async def handle_function_tool_result(
         self, event: FunctionToolResultEvent
@@ -490,7 +621,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                 message = (
                     content
                     if isinstance(content, str)
-                    else json.dumps(content, default=str)
+                    else _pydantic_to_json(content, serialize_unknown=True).decode()
                 )
                 yield reasoning_step(message, event_type=EVENT_TYPE_ERROR)
             return
@@ -502,6 +633,11 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if not tool_call_id:
             return
 
+        call_info = self._state.get_tool_call(tool_call_id)
+        effective_tool_name = (
+            call_info.tool_name if call_info else result_part.tool_name
+        )
+
         # Visualization tools (chart, table, html) - all use the same pattern
         viz_tools = {
             CHART_TOOL_NAME: "chart",
@@ -509,8 +645,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             HTML_TOOL_NAME: "html",
         }
 
-        if result_part.tool_name in viz_tools:
-            key = viz_tools[result_part.tool_name]
+        if effective_tool_name in viz_tools:
+            key = viz_tools[effective_tool_name]
             metadata = getattr(result_part, "metadata", {}) or {}
             viz_artifact = metadata.get(key)
 
@@ -540,9 +676,15 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             yield content
             return
 
-        call_info = self._state.get_tool_call(tool_call_id)
+        if isinstance(content, DeferredToolRequests):
+            async for sse in self._handle_deferred_tool_requests(content):
+                yield sse
+            return
+
         if call_info is None:
             return
+
+        self._state.complete_local_tool_call(tool_call_id, result_part.content)
 
         if call_info.widget is not None:
             citation_details = format_args(call_info.args)
@@ -550,7 +692,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             citation = cite(
                 call_info.widget,
                 call_info.args,
-                extra_details=citation_details if citation_details else None,
+                extra_details=citation_details or None,
             )
             enriched = self._enrich_citation(call_info.widget, citation)
             self._state.add_citation(enriched)
@@ -567,9 +709,20 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         for sse in handle_generic_tool_result(
             call_info,
             result_part.content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
         ):
             yield sse
+
+    def _build_local_tool_capsule_payload(self) -> str | None:
+        """Build a capsule payload from completed local tool entries."""
+        if not self.enable_local_tool_history_capsule:
+            return None
+
+        entries = self._state.drain_unflushed_local_entries()
+        if not entries:
+            return None
+
+        return pack_tool_history(entries)
 
     async def after_stream(self) -> AsyncIterator[SSE]:
         if self._state.has_thinking():
@@ -579,28 +732,21 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             self._state.clear_thinking()
 
         # Flush any remaining text in the parser buffer
-        if self._has_streamed_text or self._final_output is None:
-            for event in self._stream_parser.flush(self._record_text_streamed):
+        if self._state.has_streamed_text or self._final_output is None:
+            for event in self._stream_parser.flush(self._state.record_text_streamed):
                 yield event
 
         while self._queued_viz_artifacts:
-            artifact = self._pop_next_viz_artifact()
-            if artifact is not None:
-                yield artifact
+            yield self._queued_viz_artifacts.popleft()
 
         # Emit all citations at the end
-        if self._state.has_citations():
-            yield citations(self._state.get_citations())
-            self._state.clear_citations()
+        drained_citations = self._state.drain_citations()
+        if drained_citations:
+            yield citations(drained_citations)
 
-        if self._final_output and not self._has_streamed_text:
-            events = self._text_events_with_artifacts(self._final_output)
-            for event in events:
+        if self._final_output and not self._state.has_streamed_text:
+            for event in self._text_events_with_artifacts(self._final_output):
                 yield event
-
-    def _artifact_from_output(self, output: Any) -> SSE | None:
-        """Create an artifact (chart or table) from agent output if possible."""
-        return artifact_from_output(output)
 
     def _widget_result_events(
         self,
@@ -612,7 +758,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         events = tool_result_events_from_content(
             content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
             widget_entries=widget_entries,
         )
         if events:
@@ -621,24 +767,20 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         return handle_generic_tool_result(
             call_info,
             content,
-            mark_streamed_text=self._record_text_streamed,
+            mark_streamed_text=self._state.record_text_streamed,
+            content_events=events,
         )
 
     def _text_events_with_artifacts(self, text: str) -> list[SSE]:
         return self._stream_parser.parse(
             text,
             self._artifact_generator(),
-            on_text_streamed=self._record_text_streamed,
+            on_text_streamed=self._state.record_text_streamed,
         )
 
     def _artifact_generator(self) -> Iterator[MessageArtifactSSE]:
         while self._queued_viz_artifacts:
-            yield self._queued_viz_artifacts.pop(0)
-
-    def _pop_next_viz_artifact(self) -> MessageArtifactSSE | None:
-        if self._queued_viz_artifacts:
-            return self._queued_viz_artifacts.pop(0)
-        return None
+            yield self._queued_viz_artifacts.popleft()
 
     def _emit_placeholder_artifact(self) -> list[SSE]:
         if not self._stream_parser.has_pending_placeholder():

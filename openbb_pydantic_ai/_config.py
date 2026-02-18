@@ -14,6 +14,11 @@ PDF_QUERY_TOOL_NAME = "pdf_query"
 CHART_PLACEHOLDER_TOKEN = "{{place_chart_here}}"  # noqa: S105
 CHART_PLACEHOLDER_TOKENS = (CHART_PLACEHOLDER_TOKEN,)
 
+# Local tool history capsule constants
+LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY = "openbb_local_tool_capsule"
+LOCAL_TOOL_CAPSULE_REHYDRATED_KEY = "openbb_local_tool_rehydrated"
+LOCAL_TOOL_CAPSULE_RESULT_KEY = "openbb_local_tool_result"
+
 
 # Event type constants
 EVENT_TYPE_THINKING = "Thinking"

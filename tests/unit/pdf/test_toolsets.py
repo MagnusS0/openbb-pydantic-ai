@@ -229,3 +229,18 @@ def test_pdf_query_read_section_by_index(mocker) -> None:
     citations = result.metadata.get("citations")
     assert isinstance(citations, list)
     assert citations[0].source_info.type == "direct retrieval"
+
+
+def test_pdf_query_read_table_missing_index_is_nonfatal(mocker) -> None:
+    cached = _empty_cached_document()
+    mocker.patch("openbb_pydantic_ai.pdf._toolsets.get_document", return_value=cached)
+
+    params = PdfQueryParams.model_construct(
+        doc_id="doc-123",
+        action=PdfAction.read_table,
+        table_index=None,
+    )
+    result = _pdf_query(None, params)  # type: ignore[arg-type]
+
+    assert isinstance(result, str)
+    assert "read_table requires `table_index`." in result
