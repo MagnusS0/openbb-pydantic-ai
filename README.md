@@ -13,7 +13,7 @@ OpenBB SSE events back to the UI.
 - **Stateless by design**: each `QueryRequest` carries the full conversation history, widgets, context, and URLs so requests are processed independently.
 - **First-class widget tools**: every widget becomes a deferred Pydantic AI tool; when the model calls one, the adapter emits `copilotFunctionCall` events and waits for the Workspace to return data before resuming.
 - **Rich event stream**: reasoning steps, thinking traces, tables, charts, HTML artifacts, and citations are streamed as native OpenBB SSE payloads.
-- **PDF context**: install the `[pdf]` extra and any PDF widget in the Workspace is automatically extracted and passed as context to the agent.
+- **PDF context**: install the `[pdf]` extra and the agent can extract and query PDF widgets on the active dashboard, with citations linked to specific pages.
 - **Output helpers included**: structured outputs (dicts/lists) are auto-detected and converted to tables or charts; chart parameters are normalized for consistent rendering.
 
 See the [OpenBB Custom Agent SDK](https://github.com/OpenBB-finance/openbb-ai) and
@@ -176,13 +176,11 @@ Enable in `agents.json`:
 
 ### PDF Context
 
-Install the `[pdf]` extra and any PDF widget on the active dashboard is automatically extracted and passed as context before the run starts, no code changes needed.
+Install the `[pdf]` extra to enable PDF support. When a PDF widget is on the active dashboard, the agent can extract and query it with citations linked to specific pages.
 
 ```bash
 uv add "openbb-pydantic-ai[pdf]"
 ```
-
-Text is extracted and linked back to citation bounding boxes so the agent can cite specific pages (currently you get a citation to the page, and not a displayed bounding box).
 
 > **Performance**: GPU extraction is significantly faster. CPU works, but expect slowdowns on documents over ~50 pages.
 
