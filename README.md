@@ -10,27 +10,16 @@ run behind OpenBB Workspace by translating `QueryRequest` payloads into a Pydant
 AI run, exposing Workspace widgets as deferred tools, and streaming native
 OpenBB SSE events back to the UI.
 
-- **Stateless by design**: each `QueryRequest` already carries the full
-  conversation history, widgets, context, and URLs, so the adapter can process
-  requests independently.
-- **First-class widget tools**: every widget becomes a deferred Pydantic AI tool;
-  when the model calls one, the adapter emits `copilotFunctionCall` events via
-  `get_widget_data` and waits for the Workspace to return data before resuming.
-- **Rich event stream**: reasoning steps, “Thinking“ traces, tables, charts, and
-  citations are streamed as OpenBB SSE payloads so the Workspace UI can group
-  them into dropdowns automatically.
-- **Output helpers included**: structured model outputs (dicts/lists) are
-  auto-detected and turned into tables or charts, with chart parameter
-  normalization to ensure consistent rendering.
+- **Stateless by design**: each `QueryRequest` carries the full conversation history, widgets, context, and URLs so requests are processed independently.
+- **First-class widget tools**: every widget becomes a deferred Pydantic AI tool; when the model calls one, the adapter emits `copilotFunctionCall` events and waits for the Workspace to return data before resuming.
+- **Rich event stream**: reasoning steps, thinking traces, tables, charts, HTML artifacts, and citations are streamed as native OpenBB SSE payloads.
+- **PDF context**: install the `[pdf]` extra and any PDF widget in the Workspace is automatically extracted and passed as context to the agent.
+- **Output helpers included**: structured outputs (dicts/lists) are auto-detected and converted to tables or charts; chart parameters are normalized for consistent rendering.
 
-To learn more about the underlying SDK types, see the
-[OpenBB Custom Agent SDK repo](https://github.com/OpenBB-finance/openbb-ai)
-and the [Pydantic AI UI adapter docs](https://ai.pydantic.dev/ui/overview/).
+See the [OpenBB Custom Agent SDK](https://github.com/OpenBB-finance/openbb-ai) and
+[Pydantic AI UI adapter docs](https://ai.pydantic.dev/ui/overview/) for the underlying types.
 
 ## Installation
-
-The adapter is published as a lightweight package, install it wherever you build
-custom agents:
 
 ```bash
 pip install openbb-pydantic-ai
@@ -38,21 +27,35 @@ pip install openbb-pydantic-ai
 uv add openbb-pydantic-ai
 ```
 
+For PDF context support (requires [docling](https://github.com/docling-project/docling)):
+
+```bash
+uv add "openbb-pydantic-ai[pdf]"
+# GPU variant (CUDA 12.8)
+uv add "openbb-pydantic-ai[pdf-cu128]"
+```
+
 ## Quick Start (FastAPI)
 
 ```python
+from anyio import BrokenResourceError
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic_ai import Agent
+
 from openbb_pydantic_ai import OpenBBAIAdapter, OpenBBDeps
 
 agent = Agent(
-    "openai:gpt-5",
+    "openrouter:minimax/minimax-m2.5",
     instructions="Be concise and helpful. Only use widget tools for data lookups.",
     deps_type=OpenBBDeps,
 )
+
 app = FastAPI()
 AGENT_BASE_URL = "http://localhost:8003"
-# OpenBB Workspace discovers agents via this endpoint
+
+
 @app.get("/agents.json")
 async def agents_json():
     return JSONResponse(
@@ -61,33 +64,26 @@ async def agents_json():
                 "name": "My Custom Agent",
                 "description": "This is my custom agent",
                 "image": f"{AGENT_BASE_URL}/my-custom-agent/logo.png",
-                "endpoints": {
-                    "query": f"{AGENT_BASE_URL}/query",
-                },
+                "endpoints": {"query": f"{AGENT_BASE_URL}/query"},
                 "features": {
                     "streaming": True,
-                    "widget-dashboard-select": True,  # Access priority widgets
-                    "widget-dashboard-search": True,  # Access non-priority widgets
-                    "mcp-tools": True,               # Use MCP tools
+                    "widget-dashboard-select": True,  # primary & secondary widgets
+                    "widget-dashboard-search": True,  # extra widgets
+                    "mcp-tools": True,
                 },
             }
         }
     )
-# Main query endpoint that handles SSE streaming
+
+
 @app.post("/query")
 async def query(request: Request):
-    """
-    OpenBB Workspace sends POST requests with QueryRequest payload.
-    The adapter handles SSE streaming automatically.
-    """
     try:
-        return await OpenBBAIAdapter.dispatch_request(
-            request, agent=agent
-        )
+        return await OpenBBAIAdapter.dispatch_request(request, agent=agent)
     except BrokenResourceError:
-        # Client disconnected we expect this
-        pass
-# CORS configuration for OpenBB Workspace domain
+        pass  # client disconnected
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://pro.openbb.co"],
@@ -101,68 +97,114 @@ app.add_middleware(
 
 #### 1. Request Handling
 
-- OpenBB Workspace calls the `/query` endpoint with a `QueryRequest` body
-- `OpenBBAIAdapter` validates it and builds the Pydantic AI message stack
-- Workspace context and URLs are injected as system prompts
+- OpenBB Workspace POST's a `QueryRequest` to `/query`
+- `OpenBBAIAdapter` validates it, builds the Pydantic AI message stack, and injects workspace context and URLs as system prompts
 
 #### 2. Widget Tool Conversion
 
-- Widgets in the request become deferred tools
+- Widgets in the request become deferred Pydantic AI tools
 - Each call emits a `copilotFunctionCall` event (via `get_widget_data`)
-- The adapter pauses until Workspace responds with data
+- The adapter pauses until Workspace responds with data, then resumes the run
 
 #### 3. Event Streaming
 
-Pydantic AI events are wrapped into OpenBB SSE events:
+| Pydantic AI event | OpenBB SSE event |
+|---|---|
+| Text chunk | `copilotMessageChunk` |
+| Reasoning / thinking block | Collapsed under "Step-by-step reasoning" dropdown |
+| Table / chart / HTML artifact | `copilotMessageArtifact` |
+| Widget citations | `copilotCitationCollection` (batched at end of run) |
 
-- **Text chunks** → stream via `copilotMessageChunk`
-- **Reasoning steps** → appear under the "Step-by-step reasoning" dropdown (including Thinking sections)
-- **Tables/charts** → emitted as `copilotMessageArtifact` events with correct chart parameters for consistent rendering
-- **Citations** → fire at the end of the run for every widget tool used
+## Features
 
-### Advanced Usage
+### Widget Toolsets
 
-Need more control? Instantiate the adapter manually:
+Widgets are grouped by priority (`primary`, `secondary`, `extra`) and exposed through dedicated toolsets. Tool names follow the `openbb_widget_<identifier>` convention with any redundant `openbb_` prefix trimmed (e.g. `openbb_widget_financial_statements`).
 
-```python
-from openbb_pydantic_ai import OpenBBAIAdapter
+Control access via the `agents.json` feature flags:
 
-run_input = OpenBBAIAdapter.build_run_input(body_bytes)
-adapter = OpenBBAIAdapter(agent=agent, run_input=run_input)
-async for event in adapter.run_stream():
-    yield event  # Already encoded as OpenBB SSE payloads
+```json
+"features": {
+    "widget-dashboard-select": true,
+    "widget-dashboard-search": true
+}
 ```
 
-You can also supply `message_history`, `deferred_tool_results`, or `on_complete`
-callbacks—any option supported by `Agent.run_stream_events()` is accepted.
+### Visualization: Charts, Tables & HTML
 
-**Runtime deps & prompts**
+Three built-in tools handle structured output. The model can call any of them directly; the adapter handles serialization and streaming.
 
-- `OpenBBDeps` bundles widgets (grouped by priority), context rows, relevant
-  URLs, workspace state, timezone, and a serialized `state` dict you can pass to
-  toolsets or output validators.
-- The adapter merges dashboard context and current widget parameter values into
-  the runtime instructions automatically; append your own instructions without
-  re-supplying that context.
+#### `openbb_create_chart`
 
-### Progressive Tool Discovery (Default)
+Creates chart artifacts inline in the response. Supported types: `line`, `bar`, `scatter`, `pie`, `donut`.
 
-`OpenBBAIAdapter` now wraps toolsets with a progressive discovery layer by
-default. Instead of exposing every tool schema upfront, the model gets 4
-meta-tools:
+Insert `{{place_chart_here}}` in the model's text where the chart should appear — the adapter swaps the placeholder with the rendered artifact while streaming:
 
-- `list_tools`
-- `search_tools`
-- `get_tool_schema`
-- `call_tools`
+```
+Here is the revenue breakdown: {{place_chart_here}}
+```
 
-This keeps the initial prompt smaller and fetches full schemas only when needed.
-Deferred tools are still delegated to the original toolsets, so widget/MCP
-flows continue to emit `get_widget_data` and `execute_agent_tool` events as
-before.
+Required axes:
+- `line` / `bar` / `scatter`: `x_key` + `y_keys`
+- `pie` / `donut`: `angle_key` + `callout_label_key`
 
-If you need the previous direct-tool behavior, disable it when creating the
-adapter:
+Different field spellings (`y_keys`, `yKeys`, etc.) are accepted and normalized before emitting.
+
+#### `openbb_create_table`
+
+Creates a table artifact from structured data with explicit column ordering and metadata. Use this when you want predictable output over auto-detection.
+
+#### `openbb_create_html`
+
+Renders a self-contained HTML artifact, useful for custom layouts, formatted reports, or SVG-based plots when Markdown isn't enough.
+
+> **Constraint**: limited to HTML + CSS + inline SVG. No JavaScript. This is an OpenBB Workspace restriction on non-Enterprise plans.
+
+**Auto-detection**: dict/list outputs shaped like `{"type": "table", "data": [...]}` or a plain list of dicts are automatically converted to table artifacts without calling any tool explicitly.
+
+**Markdown tables** are also supported: stream tabular data as Markdown and Workspace renders it as an interactive table users can promote to a widget.
+
+### MCP Tools
+
+Tools listed in `QueryRequest.tools` are exposed as an external MCP toolset. The model sees the same tool names the Workspace UI presents. Deferred `execute_agent_tool` results replay on the next request just like widget results.
+
+Enable in `agents.json`:
+
+```json
+"features": { "mcp-tools": true }
+```
+
+### PDF Context
+
+Install the `[pdf]` extra and any PDF widget on the active dashboard is automatically extracted and passed as context before the run starts, no code changes needed.
+
+```bash
+uv add "openbb-pydantic-ai[pdf]"
+```
+
+Text is extracted and linked back to citation bounding boxes so the agent can cite specific pages (currently you get a citation to the page, and not a displayed bounding box).
+
+> **Performance**: GPU extraction is significantly faster. CPU works, but expect slowdowns on documents over ~50 pages.
+
+### Deferred Results & Citations
+
+- Pending widget responses in the request are replayed before the run starts, keeping multi-turn workflows seamless.
+- Every widget call records a citation via `openbb_ai.helpers.cite`, emitted as a `copilotCitationCollection` at the end of the run.
+
+## Progressive Tool Discovery (Default)
+
+Instead of dumping every tool schema into the context upfront, the adapter wraps toolsets with four meta-tools:
+
+| Meta-tool | Purpose |
+|---|---|
+| `list_tools` | List available tools by group |
+| `search_tools` | Keyword search across tool descriptions |
+| `get_tool_schema` | Fetch the full schema for a specific tool |
+| `call_tools` | Invoke a tool by name |
+
+The model fetches schemas only when it needs them, keeping the initial context window small. Deferred flows (widget data, MCP) continue to emit `get_widget_data` and `execute_agent_tool` events as before.
+
+To disable and expose all schemas upfront:
 
 ```python
 adapter = OpenBBAIAdapter(
@@ -172,20 +214,13 @@ adapter = OpenBBAIAdapter(
 )
 ```
 
-### Adding Custom Tools to Progressive Discovery
+## Adding Custom Toolsets
 
-You can add third-party/custom toolsets to the adapter's progressive discovery
-without subclassing `OpenBBAIAdapter`.
+Pass custom or third-party toolsets to the adapter at request time rather than mounting them on `Agent`. They are merged into the progressive discovery wrapper automatically.
 
-Important integration rule:
+> **Important**: do **not** also pass these toolsets to `Agent(toolsets=[...])` when using the OpenBB adapter — they would appear as both direct and progressive tools.
 
-- Pass tagged toolsets to the adapter runtime (`adapter.run_stream(..., toolsets=...)`
-  or `OpenBBAIAdapter.dispatch_request(..., toolsets=...)`).
-- Do **not** mount those same toolsets directly on `Agent(toolsets=[...])` when
-  using the OpenBB adapter, or they can appear as direct/base tools in addition
-  to progressive discovery.
-
-Use `add_to_progressive(...)` to tag an entire toolset:
+Tag a toolset with `add_to_progressive(...)`:
 
 ```python
 from pydantic_ai.toolsets import FunctionToolset
@@ -196,10 +231,12 @@ from openbb_pydantic_ai.tool_discovery import add_to_progressive
 
 custom_tools = FunctionToolset[OpenBBDeps](id="custom_agent_tools")
 
+
 @custom_tools.tool
 def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
     _ = ctx
     return f"Custom note for {symbol}"
+
 
 add_to_progressive(
     custom_tools,
@@ -207,82 +244,47 @@ add_to_progressive(
     description="Custom user tools",
 )
 
-stream = adapter.run_stream(toolsets=[custom_tools])
+# Pass at request time
+return await OpenBBAIAdapter.dispatch_request(request, agent=agent, toolsets=[custom_tools])
 ```
 
-The same pattern for FastAPI `dispatch_request`:
-
-```python
-return await OpenBBAIAdapter.dispatch_request(
-    request,
-    agent=agent,
-    toolsets=[custom_tools],
-)
-```
-
-Or use `@progressive(...)` on a tool function to tag the containing toolset:
+Or use the `@progressive(...)` decorator directly on the tool function:
 
 ```python
 from openbb_pydantic_ai.tool_discovery import progressive
 
-@progressive(
-    toolset=custom_tools,
-    group="custom_agent_tools",
-    description="Custom user tools",
-)
+
+@progressive(toolset=custom_tools, group="custom_agent_tools", description="Custom user tools")
 @custom_tools.tool
 def earnings_note(ctx: RunContext[OpenBBDeps], symbol: str) -> str:
     _ = ctx
     return f"Custom note for {symbol}"
 ```
 
-Behavior:
+Untagged toolsets passed at request time are forwarded as standalone toolsets without being merged into the progressive wrapper.
 
-- Tagged toolsets are merged into the adapter's single progressive wrapper.
-- Untagged toolsets are forwarded as standalone toolsets.
-- This avoids creating multiple progressive control planes in one run.
+## Advanced Usage
 
-## Features
+Instantiate the adapter manually for full control:
 
-### Widget Toolsets
+```python
+from openbb_pydantic_ai import OpenBBAIAdapter
 
-- Widgets are grouped by priority (`primary`, `secondary`, `extra`) and exposed
-  through dedicated toolsets so you can gate access if needed.
-- Tool names start with `openbb_widget_` plus the widget identifier; any
-  redundant `openbb_` prefix from the origin is trimmed so names stay concise
-  (e.g., `openbb_widget_sandbox_financial_statements`). Use
-  `build_widget_tool_name` to reproduce the routing string exactly.
+run_input = OpenBBAIAdapter.build_run_input(body_bytes)
+adapter = OpenBBAIAdapter(agent=agent, run_input=run_input)
 
-### MCP Tools
+async for event in adapter.run_stream():
+    yield event  # already encoded as OpenBB SSE payloads
+```
 
-- Any tools listed in `QueryRequest.tools` are exposed as a external
-  MCP toolset, so the model can call the same names the Workspace UI presents.
-- Deferred `execute_agent_tool` results replay on the next request just like
-  widget results, keeping multi-turn streaming consistent.
+`message_history`, `deferred_tool_results`, and `on_complete` callbacks are forwarded directly to `Agent.run_stream_events()`.
 
-### Deferred Results & Citations
-
-- Pending widget responses provided in the request are replayed before the run
-  starts, making multi-turn workflows seamless.
-- Every widget call records a citation via `openbb_ai.helpers.cite`, emitted as a
-  `copilotCitationCollection` at the end of the run.
-
-### Structured Output Detection
-
-The adapter provides built-in helpers and automatic detection for charts and tables:
-
-- **Markdown tables** - Stream tabular data as Markdown; Workspace renders them as tables and lets users promote them to widgets.
-- **`openbb_create_chart`** - Create chart artifacts (line, bar, scatter, pie, donut) with validation. Insert `{{place_chart_here}}` in the response where the chart should appear; the adapter swaps that placeholder for the rendered artifact while streaming.
-- **Auto-detection** - Dict/list outputs shaped like `{"type": "table", "data": [...]}` (or just a list of dicts) automatically become tables.
-- **Flexible chart parameters** - Chart outputs tolerate different field spellings (`y_keys`, `yKeys`, etc.) and validate required axes before emitting.
-- **`openbb_create_table`** - Explicitly create a table artifact from structured data when you want predictable column ordering and metadata.
+**Runtime deps & prompts**: `OpenBBDeps` bundles widgets (by priority group), context rows, relevant URLs, workspace state, timezone, and a `state` dict you can pass to toolsets or output validators. The adapter merges dashboard context and current widget parameter values into the runtime instructions automatically — append your own instructions without re-supplying that context.
 
 ## Local Development
 
-This repo ships a UV-based workflow:
-
 ```bash
-uv sync --dev         # install dependencies
-uv run pytest      # run the focused test suite
-uv run ty check    # type checking (ty)
+uv sync --dev
+uv run pytest
+uv run pre-commit run --all-files  # lint + format
 ```
