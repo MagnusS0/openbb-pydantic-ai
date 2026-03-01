@@ -146,6 +146,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         agent: AbstractAgent[OpenBBDeps, Any],
         enable_progressive_tool_discovery: bool = True,
         enable_local_tool_history_capsule: bool = True,
+        **kwargs: Any,
     ) -> OpenBBAIAdapter:
         """Create adapter and preprocess PDF payloads before message transforms."""
         run_input = cls.build_run_input(await request.body())
@@ -792,6 +793,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         enable_progressive_tool_discovery: bool = True,
         enable_local_tool_history_capsule: bool = True,
         on_complete: OnCompleteFunc[SSE] | None = None,
+        **kwargs: Any,
     ) -> "Response":
         """Handle a request and return a streaming response.
 
