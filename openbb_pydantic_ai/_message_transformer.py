@@ -60,7 +60,7 @@ class MessageTransformer:
             List of Pydantic AI messages
         """
         tool_call_id_map = self._build_tool_call_id_map(messages)
-        tool_name_map = self._build_tool_name_map(messages) if self._rewrite else {}
+        tool_name_map = self._build_tool_name_map(messages)
         call_counters: dict[str, int] = {}
 
         builder = MessagesBuilder()
@@ -118,7 +118,7 @@ class MessageTransformer:
         """Build tool_call_id -> pydantic-ai tool_name from extra_state.
 
         Used when rewriting UI protocol names (get_widget_data, execute_agent_tool)
-        back to `call_tools`.
+        back to `call_tools` or direct MCP tool names.
         """
         name_map: dict[str, str] = {}
         for msg in messages:
@@ -135,6 +135,12 @@ class MessageTransformer:
                 tc_name = tc.get("tool_name")
                 if isinstance(tc_id, str) and isinstance(tc_name, str):
                     name_map[tc_id] = tc_name
+                    continue
+
+                if isinstance(tc_id, str) and msg.function == EXECUTE_MCP_TOOL_NAME:
+                    fallback_name = msg.input_arguments.get("tool_name")
+                    if isinstance(fallback_name, str) and fallback_name:
+                        name_map[tc_id] = fallback_name
         return name_map
 
     def _rewrite_tool_call(
@@ -144,8 +150,18 @@ class MessageTransformer:
         args: dict[str, Any] | None,
         tool_name_map: dict[str, str],
     ) -> tuple[str, dict[str, Any] | None]:
-        """Rewrite a UI protocol tool call to `call_tools` if applicable."""
+        """Rewrite UI protocol wrapper calls to model-visible tool calls."""
         if not self._should_rewrite(function_name, tool_call_id, tool_name_map):
+            if function_name == EXECUTE_MCP_TOOL_NAME:
+                direct_tool_name = self._direct_mcp_tool_name(
+                    tool_call_id,
+                    args,
+                    tool_name_map,
+                )
+                if direct_tool_name is not None:
+                    return direct_tool_name, self._normalize_rewritten_call_args(
+                        function_name, args
+                    )
             return function_name, args
 
         pydantic_tool_name = tool_name_map.get(tool_call_id)
@@ -157,6 +173,42 @@ class MessageTransformer:
         return _CALL_TOOLS, {
             "calls": [{"tool_name": pydantic_tool_name, "arguments": normalized_args}],
         }
+
+    @staticmethod
+    def _direct_mcp_tool_name(
+        tool_call_id: str,
+        args: dict[str, Any] | None,
+        tool_name_map: dict[str, str],
+    ) -> str | None:
+        mapped_name = tool_name_map.get(tool_call_id)
+        if mapped_name:
+            return mapped_name
+
+        if not isinstance(args, dict):
+            return None
+
+        tool_name = args.get("tool_name")
+        return tool_name if isinstance(tool_name, str) and tool_name else None
+
+    def _result_tool_name(
+        self,
+        message: LlmClientFunctionCallResultMessage,
+        tool_call_id: str,
+        tool_name_map: dict[str, str] | None,
+    ) -> str:
+        result_tool_name = message.function
+        if self._should_rewrite(result_tool_name, tool_call_id, tool_name_map):
+            return _CALL_TOOLS
+
+        if result_tool_name != EXECUTE_MCP_TOOL_NAME:
+            return result_tool_name
+
+        direct_tool_name = self._direct_mcp_tool_name(
+            tool_call_id,
+            message.input_arguments,
+            tool_name_map or {},
+        )
+        return direct_tool_name or result_tool_name
 
     @staticmethod
     def _normalize_rewritten_call_args(
@@ -320,10 +372,7 @@ class MessageTransformer:
                 exc,
             )
             return
-        result_tool_name = message.function
-
-        if self._should_rewrite(result_tool_name, tool_call_id, tool_name_map):
-            result_tool_name = _CALL_TOOLS
+        result_tool_name = self._result_tool_name(message, tool_call_id, tool_name_map)
 
         result_content = self._result_content(message)
         builder.add(
@@ -369,9 +418,11 @@ class MessageTransformer:
 
             result_data = data[idx] if idx < len(data) else None
 
-            result_tool_name = message.function
-            if self._should_rewrite(result_tool_name, tool_call_id, tool_name_map):
-                result_tool_name = _CALL_TOOLS
+            result_tool_name = self._result_tool_name(
+                message,
+                tool_call_id,
+                tool_name_map,
+            )
 
             builder.add(
                 ToolReturnPart(

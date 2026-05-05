@@ -207,6 +207,42 @@ def test_handle_generic_tool_result_emits_artifacts() -> None:
     assert status_data.artifacts
 
 
+def test_handle_generic_tool_result_keeps_text_in_reasoning() -> None:
+    mark_calls = 0
+
+    def _mark() -> None:
+        nonlocal mark_calls
+        mark_calls += 1
+
+    info = ToolCallInfo(tool_name="internal_tool", args={"symbol": "AAPL"})
+
+    events = handle_generic_tool_result(
+        info,
+        content={
+            "data": [
+                {
+                    "items": [
+                        raw_object_item(
+                            "plain text result",
+                            parse_as="text",
+                            name="note",
+                        )
+                    ]
+                }
+            ]
+        },
+        mark_streamed_text=_mark,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    assert status_event.event == "copilotStatusUpdate"
+    assert status_event.data.details
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details[0]["Result"] == "plain text result"
+    assert mark_calls == 0
+
+
 def test_handle_generic_tool_result_formats_discovery_list_tools() -> None:
     info = ToolCallInfo(tool_name="list_tools", args={})
 

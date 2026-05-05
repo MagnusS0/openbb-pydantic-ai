@@ -13,6 +13,7 @@ from openbb_ai.models import (
     ClientArtifact,
     LlmClientFunctionCallResultMessage,
     MessageArtifactSSE,
+    MessageChunkSSE,
     StatusUpdateSSE,
     StatusUpdateSSEData,
     Widget,
@@ -135,13 +136,25 @@ def handle_generic_tool_result(
     events = (
         content_events
         if content_events is not None
-        else tool_result_events_from_content(
-            content, mark_streamed_text=mark_streamed_text
-        )
+        else tool_result_events_from_content(content, mark_streamed_text=lambda: None)
     )
     if events:
-        events.insert(0, reasoning_step(f"Tool '{info.tool_name}' returned"))
-        return events
+        visible_text = _message_chunk_text(events)
+        non_text_events = [
+            event for event in events if not isinstance(event, MessageChunkSSE)
+        ]
+        details: dict[str, Any] | None = format_args(info.args) or None
+        if visible_text:
+            details = details or {}
+            details["Result"] = format_arg_value(visible_text)
+
+        return [
+            reasoning_step(
+                f"Tool '{info.tool_name}' returned",
+                details=details,
+            ),
+            *non_text_events,
+        ]
 
     artifact = artifact_from_output(content)
     if artifact is not None:
@@ -173,6 +186,19 @@ def handle_generic_tool_result(
             details=details,
         )
     ]
+
+
+def _message_chunk_text(events: list[SSE]) -> str:
+    """Collect chat text chunks so generic tool output can stay in reasoning."""
+
+    chunks: list[str] = []
+    for event in events:
+        if not isinstance(event, MessageChunkSSE):
+            continue
+        delta = getattr(event.data, "delta", None)
+        if isinstance(delta, str):
+            chunks.append(delta)
+    return "".join(chunks)
 
 
 def tool_result_events_from_content(
