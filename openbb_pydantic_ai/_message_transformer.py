@@ -128,6 +128,7 @@ class MessageTransformer:
             tool_calls = extra_state.get("tool_calls", [])
             if not isinstance(tool_calls, list):
                 continue
+            has_single_tool_call = len(tool_calls) == 1
             for tc in tool_calls:
                 if not isinstance(tc, dict):
                     continue
@@ -137,7 +138,11 @@ class MessageTransformer:
                     name_map[tc_id] = tc_name
                     continue
 
-                if isinstance(tc_id, str) and msg.function == EXECUTE_MCP_TOOL_NAME:
+                if (
+                    isinstance(tc_id, str)
+                    and has_single_tool_call
+                    and msg.function == EXECUTE_MCP_TOOL_NAME
+                ):
                     fallback_name = msg.input_arguments.get("tool_name")
                     if isinstance(fallback_name, str) and fallback_name:
                         name_map[tc_id] = fallback_name

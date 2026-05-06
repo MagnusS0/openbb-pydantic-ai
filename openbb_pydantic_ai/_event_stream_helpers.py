@@ -117,7 +117,11 @@ def handle_generic_tool_result(
         Callback to mark that text has been streamed
     content_events : list[SSE] | None
         Pre-computed result of ``tool_result_events_from_content``. When
-        provided the function skips calling it again.
+        provided the function skips calling it again, so ``mark_streamed_text``
+        is intentionally not invoked on this branch. For parsed content, this
+        function calls ``tool_result_events_from_content`` without forwarding
+        ``mark_streamed_text`` so generic tool text stays in reasoning details
+        rather than becoming assistant chat text.
 
     Returns
     -------
@@ -148,13 +152,16 @@ def handle_generic_tool_result(
             details = details or {}
             details["Result"] = format_arg_value(visible_text)
 
-        return [
-            reasoning_step(
-                f"Tool '{info.tool_name}' returned",
-                details=details,
-            ),
-            *non_text_events,
-        ]
+        if visible_text or not _has_status_header(non_text_events):
+            return [
+                reasoning_step(
+                    f"Tool '{info.tool_name}' returned",
+                    details=details,
+                ),
+                *non_text_events,
+            ]
+
+        return non_text_events
 
     artifact = artifact_from_output(content)
     if artifact is not None:
@@ -199,6 +206,10 @@ def _message_chunk_text(events: list[SSE]) -> str:
         if isinstance(delta, str):
             chunks.append(delta)
     return "".join(chunks)
+
+
+def _has_status_header(events: list[SSE]) -> bool:
+    return any(isinstance(event, StatusUpdateSSE) for event in events)
 
 
 def tool_result_events_from_content(
