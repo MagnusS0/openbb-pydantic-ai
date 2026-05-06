@@ -185,8 +185,10 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     ) -> tuple[list[LlmMessage], list[LlmClientFunctionCallResultMessage]]:
         """Split messages into base history and pending deferred results.
 
-        Only results after the last AI message are considered pending. Results
-        followed by AI messages were already processed in previous turns.
+        Only trailing results that directly follow a function-call message are
+        considered pending. Results followed by AI messages were already
+        processed in previous turns, and late results after assistant text are
+        ignored to avoid restarting an already-finished run.
 
         Parameters
         ----------
@@ -201,15 +203,30 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         base = list(messages)
         pending: list[LlmClientFunctionCallResultMessage] = []
 
-        # Treat only the trailing tool results (those after the final assistant
-        # message) as pending. Leave them in the base history so the next model
-        # call still sees the complete tool call/result exchange.
-        for message in reversed(base):
+        # Treat only trailing tool results that directly continue a function
+        # call message as pending. A result that arrives after normal assistant
+        # text belongs to an already-finished turn and must not restart the run.
+        trailing_start = len(base)
+        for index in range(len(base) - 1, -1, -1):
+            message = base[index]
             if not isinstance(message, LlmClientFunctionCallResultMessage):
                 break
+            trailing_start = index
             pending.insert(0, message)
 
-        return base, pending
+        if not pending:
+            return base, pending
+
+        previous = base[trailing_start - 1] if trailing_start > 0 else None
+        if previous is not None and OpenBBAIAdapter._is_function_call_message(previous):
+            return base, pending
+
+        logger.warning(
+            "Ignoring %d trailing deferred tool result(s) that did not directly "
+            "follow a function call message",
+            len(pending),
+        )
+        return base[:trailing_start], []
 
     async def _rehydrate_local_capsules(self) -> None:
         """Inject rehydrated local tool messages from stateless extra_state capsules."""

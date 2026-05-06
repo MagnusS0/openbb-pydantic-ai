@@ -42,7 +42,8 @@ def test_tool_result_events_from_content_creates_table_for_dicts() -> None:
 
     assert events
     assert events[0].event == "copilotStatusUpdate"
-    artifacts = events[0].data.artifacts
+    artifacts = cast(StatusUpdateSSE, events[0]).data.artifacts
+    artifacts = cast(list[Any], artifacts)
     assert artifacts and artifacts[0].type == "table"
     assert not mark_called
 
@@ -64,9 +65,9 @@ def test_tool_result_events_handle_double_encoded_lists() -> None:
     )
 
     assert events
-    status_event = events[0]
+    status_event = cast(StatusUpdateSSE, events[0])
     assert status_event.event == "copilotStatusUpdate"
-    artifacts = status_event.data.artifacts
+    artifacts = cast(list[Any], status_event.data.artifacts)
     assert artifacts and artifacts[0].type == "table"
     rows = artifacts[0].content
     assert isinstance(rows, list)
@@ -100,9 +101,9 @@ def test_tool_result_events_expand_mapping_sections() -> None:
     events = tool_result_events_from_content(payload, mark_streamed_text=lambda: None)
 
     assert events
-    status_event = events[-1]
+    status_event = cast(StatusUpdateSSE, events[-1])
     assert status_event.event == "copilotStatusUpdate"
-    artifacts = status_event.data.artifacts
+    artifacts = cast(list[Any], status_event.data.artifacts)
     assert artifacts and len(artifacts) == 3
     names = [artifact.name for artifact in artifacts]
     assert names[0].endswith("financial_ratios")
@@ -161,7 +162,8 @@ def test_tool_result_events_table_parse_failure_streams_raw_text() -> None:
     status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
     assert status_data.details
-    assert status_data.details[0]["name"] == "broken"
+    details = cast(list[dict[str, Any]], status_data.details)
+    assert details[0]["name"] == "broken"
 
 
 def test_tool_result_events_unsupported_format_emits_status() -> None:
@@ -205,6 +207,42 @@ def test_handle_generic_tool_result_emits_artifacts() -> None:
     status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
     assert status_data.artifacts
+
+
+def test_handle_generic_tool_result_keeps_text_in_reasoning() -> None:
+    mark_calls = 0
+
+    def _mark() -> None:
+        nonlocal mark_calls
+        mark_calls += 1
+
+    info = ToolCallInfo(tool_name="internal_tool", args={"symbol": "AAPL"})
+
+    events = handle_generic_tool_result(
+        info,
+        content={
+            "data": [
+                {
+                    "items": [
+                        raw_object_item(
+                            "plain text result",
+                            parse_as="text",
+                            name="note",
+                        )
+                    ]
+                }
+            ]
+        },
+        mark_streamed_text=_mark,
+    )
+
+    assert len(events) == 1
+    status_event = cast(StatusUpdateSSE, events[0])
+    assert status_event.event == "copilotStatusUpdate"
+    assert status_event.data.details
+    details = cast(list[dict[str, Any]], status_event.data.details)
+    assert details[0]["Result"] == "plain text result"
+    assert mark_calls == 0
 
 
 def test_handle_generic_tool_result_formats_discovery_list_tools() -> None:

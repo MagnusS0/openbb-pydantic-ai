@@ -9,6 +9,7 @@ from openbb_ai.models import (
     DataFileReferences,
     LlmClientFunctionCallResultMessage,
     PdfDataFormat,
+    RawObjectDataFormat,
     SingleDataContent,
     SingleFileReference,
 )
@@ -165,6 +166,7 @@ async def test_preprocess_converts_pdf_file_reference_to_toc(
     item = data_content.items[0]
     assert isinstance(item, SingleDataContent)
     assert item.content == "toc from url"
+    assert isinstance(item.data_format, RawObjectDataFormat)
     assert item.data_format.parse_as == "text"
 
 
@@ -226,6 +228,7 @@ async def test_preprocess_converts_embedded_pdf_json_and_registers_widget_aliase
     assert data_content.items
     item = data_content.items[0]
     assert item.content == "toc from json"
+    assert isinstance(item.data_format, RawObjectDataFormat)
     assert item.data_format.parse_as == "text"
 
     extract_mock.assert_called_once_with(pdf_url, "NVDA filing.pdf")
