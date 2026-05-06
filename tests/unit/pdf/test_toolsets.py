@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from inline_snapshot import snapshot
 from pydantic_ai import ToolReturn
@@ -224,7 +224,7 @@ def test_pdf_query_read_section_by_index(mocker) -> None:
     result = _pdf_query(None, params)  # type: ignore[arg-type]
 
     assert isinstance(result, ToolReturn)
-    assert "Methods" in result.return_value
+    assert "Methods" in cast(str, result.return_value)
     assert isinstance(result.metadata, dict)
     citations = result.metadata.get("citations")
     assert isinstance(citations, list)
