@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 
@@ -73,9 +74,12 @@ class AgentStreamStub:
         self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.output_type = output_type if output_type is not None else object()
 
-    def run_stream_events(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+    @asynccontextmanager
+    async def run_stream_events(
+        self, *args: Any, **kwargs: Any
+    ) -> AsyncIterator[AsyncIterator[Any]]:
         self.calls.append((args, kwargs))
-        return self._stream_fn(*args, **kwargs)
+        yield self._stream_fn(*args, **kwargs)
 
 
 @pytest.fixture

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openbb_ai.models import LlmClientMessage, RoleEnum
+from pydantic import ValidationError
+from pydantic_ai.ui import DEFAULT_ALLOWED_CONTENT_TYPES
 
 from openbb_pydantic_ai import OpenBBAIAdapter
 from openbb_pydantic_ai import _adapter as adapter_module
@@ -26,7 +29,10 @@ async def test_from_request_preprocesses_messages(mocker, make_request) -> None:
     )
 
     class _RequestStub:
-        headers = {"accept": "text/event-stream"}
+        headers = {
+            "accept": "text/event-stream",
+            "content-type": "application/json",
+        }
 
         def __init__(self, payload: bytes):
             self._payload = payload
@@ -69,7 +75,80 @@ async def test_dispatch_request_uses_from_request(mocker) -> None:
         agent=agent,
         enable_progressive_tool_discovery=False,
         enable_local_tool_history_capsule=True,
+        manage_system_prompt="server",
+        allowed_file_url_schemes=frozenset({"http", "https"}),
+        allowed_file_url_force_download=frozenset(),
+        allow_uploaded_files=False,
+        strip_workspace_refs=True,
+        allowed_content_types=DEFAULT_ALLOWED_CONTENT_TYPES,
     )
     adapter.run_stream.assert_called_once()
     adapter.streaming_response.assert_called_once_with(stream)
     assert result is response
+
+
+async def test_dispatch_request_forwards_on_cancel(mocker) -> None:
+    adapter = MagicMock()
+    mocker.patch.object(
+        OpenBBAIAdapter,
+        "from_request",
+        new_callable=AsyncMock,
+        return_value=adapter,
+    )
+    on_cancel = MagicMock()
+
+    await OpenBBAIAdapter.dispatch_request(
+        MagicMock(), agent=MagicMock(), on_cancel=on_cancel
+    )
+
+    assert adapter.run_stream.call_args.kwargs["on_cancel"] is on_cancel
+
+
+def test_build_run_input_drops_unsupported_widget_param_types() -> None:
+    body = json.dumps(
+        {
+            "messages": [{"role": "human", "content": "hi"}],
+            "widgets": {
+                "secondary": [
+                    {
+                        "origin": "o",
+                        "widget_id": "w",
+                        "name": "W",
+                        "description": "d",
+                        "params": [
+                            {"name": "run", "type": "button", "description": "go"},
+                            {"name": "symbol", "type": "text", "description": "s"},
+                        ],
+                    }
+                ]
+            },
+        }
+    ).encode()
+
+    run_input = OpenBBAIAdapter.build_run_input(body)
+
+    assert run_input.widgets is not None
+    params = run_input.widgets.secondary[0].params
+    assert [p.name for p in params] == ["symbol"]
+
+
+def test_build_run_input_rejects_non_string_param_type_with_validation_error() -> None:
+    body = json.dumps(
+        {
+            "messages": [{"role": "human", "content": "hi"}],
+            "widgets": {
+                "secondary": [
+                    {
+                        "origin": "o",
+                        "widget_id": "w",
+                        "name": "W",
+                        "description": "d",
+                        "params": [{"name": "bad", "type": ["x"], "description": "d"}],
+                    }
+                ]
+            },
+        }
+    ).encode()
+
+    with pytest.raises(ValidationError):
+        OpenBBAIAdapter.build_run_input(body)

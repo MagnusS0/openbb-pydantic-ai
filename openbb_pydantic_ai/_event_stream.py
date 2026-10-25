@@ -30,16 +30,15 @@ from openbb_ai.models import (
     WidgetRequest,
 )
 from pydantic_ai import DeferredToolRequests
+from pydantic_ai.exceptions import RunCancelled
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
-    RetryPromptPart,
     TextPart,
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
     ToolCallPart,
-    ToolReturnPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.ui import UIEventStream
@@ -304,6 +303,13 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
     async def on_error(self, error: Exception) -> AsyncIterator[SSE]:
         yield reasoning_step(str(error), event_type=EVENT_TYPE_ERROR)
+
+    async def on_cancelled(self, cancelled: RunCancelled) -> AsyncIterator[SSE]:
+        # The Workspace deletes the latest tool pair on any ERROR status update,
+        # so a user-initiated cancellation must not be reported as one.
+        yield reasoning_step(
+            str(cancelled) or "Run cancelled", event_type=EVENT_TYPE_WARNING
+        )
 
     async def handle_text_start(
         self, part: TextPart, follows_text: bool = False
@@ -613,9 +619,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     async def handle_function_tool_result(
         self, event: FunctionToolResultEvent
     ) -> AsyncIterator[SSE]:
-        result_part = event.result
+        result_part = event.part
 
-        if isinstance(result_part, RetryPromptPart):
+        if result_part.outcome in ("retried", "failed", "interrupted", "denied"):
             if result_part.content:
                 content = result_part.content
                 message = (
@@ -623,10 +629,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     if isinstance(content, str)
                     else _pydantic_to_json(content, serialize_unknown=True).decode()
                 )
-                yield reasoning_step(message, event_type=EVENT_TYPE_ERROR)
-            return
-
-        if not isinstance(result_part, ToolReturnPart):
+                yield reasoning_step(message, event_type=EVENT_TYPE_WARNING)
             return
 
         tool_call_id = result_part.tool_call_id

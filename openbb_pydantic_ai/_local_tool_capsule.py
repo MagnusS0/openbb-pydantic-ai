@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import logging
 import zlib
 from typing import Any, Sequence
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 MAX_PACKED_SIZE = 250_000
 MAX_UNPACKED_SIZE = 2_000_000
@@ -53,8 +56,30 @@ class LocalToolState(BaseModel):
 
 
 def pack_tool_history(entries: Sequence[LocalToolEntry]) -> str:
-    """Serialize tool entries into a compact ASCII payload."""
-    return LocalToolState(entries=list(entries)).pack()
+    """Serialize tool entries into a compact ASCII payload.
+
+    Oldest entries are dropped until the payload fits both ``MAX_PACKED_SIZE``
+    and ``MAX_UNPACKED_SIZE`` so the result can always be unpacked again.
+    """
+    kept = list(entries)
+    dropped = 0
+    while True:
+        state = LocalToolState(entries=kept)
+        if len(state.model_dump_json()) <= MAX_UNPACKED_SIZE:
+            packed = state.pack()
+            if len(packed) <= MAX_PACKED_SIZE or not kept:
+                break
+        elif not kept:
+            packed = state.pack()
+            break
+        kept.pop(0)
+        dropped += 1
+    if dropped:
+        logger.warning(
+            "Local tool capsule exceeded its size limits; dropped %d oldest entries.",
+            dropped,
+        )
+    return packed
 
 
 def unpack_tool_history(packed: str) -> list[LocalToolEntry]:

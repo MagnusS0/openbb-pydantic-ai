@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 from pydantic import BeforeValidator, Field
 from pydantic_ai import ToolReturn
 from pydantic_ai.exceptions import CallDeferred, ModelRetry
+from pydantic_ai.messages import InstructionPart
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_core import from_json as _from_json
@@ -591,9 +592,14 @@ class ToolDiscoveryToolset(FunctionToolset[Any]):
             lines.append(self._tool_result_to_text(entry["result"]))
         return "\n".join(lines)
 
-    async def get_instructions(self, ctx: RunContext[Any]) -> str | None:
+    async def get_instructions(
+        self, ctx: RunContext[Any]
+    ) -> list[InstructionPart] | None:
         await self._resolve_pending(ctx)
-        return self.render_instructions()
+        rendered = self.render_instructions()
+        if rendered is None:
+            return None
+        return [InstructionPart(content=rendered, dynamic=True)]
 
     def render_instructions(self) -> str | None:
         """Render static discovery instructions for prompt injection."""

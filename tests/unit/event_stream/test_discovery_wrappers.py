@@ -218,7 +218,7 @@ def test_call_tools_uses_nested_tool_name_for_reasoning(make_request) -> None:
     assert "call_tools" not in call_events[0].data.message
 
     result_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name="call_tools",
             tool_call_id="meta-42",
             content=[{"name": "address", "description": "Address"}],
@@ -294,7 +294,7 @@ def test_wrapped_chart_call_replaces_placeholder_inline(make_request) -> None:
     chart_events = collect_events(
         stream.handle_function_tool_result(
             FunctionToolResultEvent(
-                result=ToolReturnPart(
+                part=ToolReturnPart(
                     tool_name="call_tools",
                     tool_call_id="chart-meta-1",
                     content=None,
@@ -361,7 +361,7 @@ def test_expanded_deferred_calls_have_stable_tool_call_ids(
     # Now simulate results coming back with those tool_call_ids
     # and verify handle_function_tool_result processes them correctly
     result_event_1 = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=tool_name,
             tool_call_id="call-parent-123-0",
             content={"data": [{"symbol": "AAPL", "price": 150}]},
@@ -376,7 +376,7 @@ def test_expanded_deferred_calls_have_stable_tool_call_ids(
 
     # Verify second result is also processed
     result_event_2 = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=tool_name,
             tool_call_id="call-parent-123-1",
             content={"data": [{"symbol": "TSLA", "price": 200}]},

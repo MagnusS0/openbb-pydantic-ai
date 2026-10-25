@@ -60,3 +60,16 @@ def test_stream_parser_buffers_until_artifact_available() -> None:
     assert isinstance(follow_up_events[1], MessageChunkSSE)
     assert follow_up_events[1].data.delta == " After"
     assert not parser.has_pending_placeholder()
+
+
+def test_stream_parser_flush_never_emits_raw_placeholder() -> None:
+    parser = StreamParser()
+
+    events = parser.parse(f"Intro {CHART_PLACEHOLDER_TOKEN}", iter(()))
+    assert parser.has_pending_placeholder()
+    events += parser.flush()
+
+    text = "".join(e.data.delta for e in events if isinstance(e, MessageChunkSSE))
+    assert CHART_PLACEHOLDER_TOKEN not in text
+    assert text == "Intro "
+    assert not parser.has_pending_placeholder()

@@ -70,6 +70,9 @@ async def _load_pdf_bytes(
     if content is not None:
         return base64.b64decode(content)
 
+    if url is None:
+        raise ValueError("Either content or url must be provided.")
+
     # Validate URL scheme
     from urllib.parse import urlparse
 
@@ -83,7 +86,7 @@ async def _load_pdf_bytes(
     import httpx
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        response = await client.get(url)  # type: ignore[arg-type]
+        response = await client.get(url)
         response.raise_for_status()
         return response.content
 

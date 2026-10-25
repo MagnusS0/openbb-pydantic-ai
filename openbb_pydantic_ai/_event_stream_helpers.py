@@ -13,6 +13,7 @@ from openbb_ai.models import (
     ClientArtifact,
     LlmClientFunctionCallResultMessage,
     MessageArtifactSSE,
+    MessageChunkSSE,
     StatusUpdateSSE,
     StatusUpdateSSEData,
     Widget,
@@ -22,7 +23,7 @@ from pydantic_core import from_json as _from_json
 from openbb_pydantic_ai._viz_toolsets import _html_artifact
 
 from ._config import (
-    EVENT_TYPE_ERROR,
+    EVENT_TYPE_WARNING,
     GET_WIDGET_DATA_TOOL_NAME,
     MAX_NESTED_JSON_DECODE_DEPTH,
     MAX_TABLE_PARSE_DEPTH,
@@ -116,7 +117,11 @@ def handle_generic_tool_result(
         Callback to mark that text has been streamed
     content_events : list[SSE] | None
         Pre-computed result of ``tool_result_events_from_content``. When
-        provided the function skips calling it again.
+        provided the function skips calling it again, so ``mark_streamed_text``
+        is intentionally not invoked on this branch. For parsed content, this
+        function calls ``tool_result_events_from_content`` without forwarding
+        ``mark_streamed_text`` so generic tool text stays in reasoning details
+        rather than becoming assistant chat text.
 
     Returns
     -------
@@ -135,13 +140,28 @@ def handle_generic_tool_result(
     events = (
         content_events
         if content_events is not None
-        else tool_result_events_from_content(
-            content, mark_streamed_text=mark_streamed_text
-        )
+        else tool_result_events_from_content(content, mark_streamed_text=lambda: None)
     )
     if events:
-        events.insert(0, reasoning_step(f"Tool '{info.tool_name}' returned"))
-        return events
+        visible_text = _message_chunk_text(events)
+        non_text_events: list[SSE] = [
+            event for event in events if not isinstance(event, MessageChunkSSE)
+        ]
+        details: dict[str, Any] | None = format_args(info.args) or None
+        if visible_text:
+            details = details or {}
+            details["Result"] = format_arg_value(visible_text)
+
+        if visible_text or not _has_status_header(non_text_events):
+            return [
+                reasoning_step(
+                    f"Tool '{info.tool_name}' returned",
+                    details=details,
+                ),
+                *non_text_events,
+            ]
+
+        return non_text_events
 
     artifact = artifact_from_output(content)
     if artifact is not None:
@@ -173,6 +193,23 @@ def handle_generic_tool_result(
             details=details,
         )
     ]
+
+
+def _message_chunk_text(events: list[SSE]) -> str:
+    """Collect chat text chunks so generic tool output can stay in reasoning."""
+
+    chunks: list[str] = []
+    for event in events:
+        if not isinstance(event, MessageChunkSSE):
+            continue
+        delta = getattr(event.data, "delta", None)
+        if isinstance(delta, str):
+            chunks.append(delta)
+    return "".join(chunks)
+
+
+def _has_status_header(events: list[SSE]) -> bool:
+    return any(isinstance(event, StatusUpdateSSE) for event in events)
 
 
 def tool_result_events_from_content(
@@ -407,7 +444,7 @@ def _process_error_result(entry: dict[str, Any]) -> SSE | None:
     if error_type and content:
         return StatusUpdateSSE(
             data=StatusUpdateSSEData(
-                eventType="ERROR",
+                eventType=EVENT_TYPE_WARNING,
                 message=str(content),
                 details=[{"error_type": error_type}],
             )
@@ -538,7 +575,7 @@ def _parse_item_content(
         if error_messages:
             return None, StatusUpdateSSE(
                 data=StatusUpdateSSEData(
-                    eventType=EVENT_TYPE_ERROR,
+                    eventType=EVENT_TYPE_WARNING,
                     message=error_messages[0],
                     details=[{"errors": error_messages}],
                 )
@@ -546,7 +583,7 @@ def _parse_item_content(
 
         return None, StatusUpdateSSE(
             data=StatusUpdateSSEData(
-                eventType="WARNING",
+                eventType=EVENT_TYPE_WARNING,
                 message=f"Failed to parse content for '{display_name}'",
                 details=[{"name": display_name}],
             )
@@ -563,7 +600,7 @@ def _item_to_artifact(
     if error_messages:
         return [], StatusUpdateSSE(
             data=StatusUpdateSSEData(
-                eventType=EVENT_TYPE_ERROR,
+                eventType=EVENT_TYPE_WARNING,
                 message=error_messages[0],
                 details=[{"errors": error_messages}],
             )

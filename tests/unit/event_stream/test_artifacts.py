@@ -65,7 +65,7 @@ def test_widget_dict_results_render_tool_output(
     }
 
     result_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=tool_name,
             tool_call_id="call-dict",
             content={
@@ -146,7 +146,7 @@ def test_chart_tool_result_replaces_placeholder_inline(make_request) -> None:
     assert text_events[0].data.delta == "Intro "
 
     tool_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=CHART_TOOL_NAME,
             tool_call_id="chart-1",
             content=None,
@@ -170,7 +170,7 @@ def test_chart_tool_result_without_placeholder_streams_artifact(make_request) ->
     assert isinstance(text_events[0], MessageChunkSSE)
 
     tool_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=CHART_TOOL_NAME,
             tool_call_id="chart-2",
             content=None,
@@ -197,7 +197,7 @@ def test_html_tool_result_queues_artifact(make_request) -> None:
     )
 
     tool_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=HTML_TOOL_NAME,
             tool_call_id="html-1",
             content=None,

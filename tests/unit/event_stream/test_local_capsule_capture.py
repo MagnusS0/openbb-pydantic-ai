@@ -64,7 +64,7 @@ def test_local_capsule_attached_once_and_preserves_tool_calls(
     collect_events(
         stream.handle_function_tool_result(
             FunctionToolResultEvent(
-                result=ToolReturnPart(
+                part=ToolReturnPart(
                     tool_name="list_tools",
                     tool_call_id="local-1",
                     content="# openbb_viz_tools\ncount: 1\n- openbb_create_chart",
