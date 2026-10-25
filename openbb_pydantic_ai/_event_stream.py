@@ -41,7 +41,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
-from pydantic_ai.ui import UIEventStream
+from pydantic_ai.ui import NativeEvent, OnCancelFunc, OnCompleteFunc, UIEventStream
 from pydantic_core import to_json as _pydantic_to_json
 
 from openbb_pydantic_ai._config import (
@@ -110,6 +110,23 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
     def encode_event(self, event: SSE) -> str:
         return _encode_sse(event)
+
+    async def transform_stream(
+        self,
+        stream: AsyncIterator[NativeEvent],
+        on_complete: OnCompleteFunc[SSE] | None = None,
+        on_cancel: OnCancelFunc[SSE] | None = None,
+    ) -> AsyncIterator[SSE]:
+        # The Workspace handles a function call inline, running the whole
+        # follow-up chain before reading on, so anything after the call would
+        # land after the final answer. Keep consuming so the run ends cleanly.
+        call_sent = False
+        async for event in super().transform_stream(stream, on_complete, on_cancel):
+            if call_sent:
+                logger.debug("Dropping %s emitted after a function call", type(event))
+                continue
+            yield event
+            call_sent = isinstance(event, FunctionCallSSE)
 
     async def before_stream(self) -> AsyncIterator[SSE]:
         """Emit tool results for any deferred results provided upfront."""

@@ -13,6 +13,7 @@ from openbb_ai.models import (
     LlmClientFunctionCall,
     LlmClientFunctionCallResultMessage,
     LlmClientMessage,
+    MessageChunkSSE,
     RoleEnum,
     SourceInfo,
 )
@@ -20,6 +21,8 @@ from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
+    PartStartEvent,
+    TextPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -243,3 +246,26 @@ async def test_follow_up_history_is_valid_after_mixed_response(
     call_ids = [p.tool_call_id for p in tool_call_parts(adapter)]
     return_ids = [p.tool_call_id for p in tool_return_parts(adapter)]
     assert call_ids == return_ids == ["local-1", "w-1"]
+
+
+def test_events_after_mid_run_function_call_are_dropped(
+    widget_collection, make_request
+) -> None:
+    stream, tool_name = _build_stream(widget_collection, make_request)
+    deferred = DeferredToolRequests()
+    deferred.calls.append(
+        ToolCallPart(tool_name=tool_name, tool_call_id="w-1", args={"symbol": "AAPL"})
+    )
+
+    async def native_events():
+        yield FunctionToolResultEvent(
+            part=ToolReturnPart(
+                tool_name="call_tools", content=deferred, tool_call_id="ct-1"
+            )
+        )
+        yield PartStartEvent(index=0, part=TextPart(content="late text"))
+
+    events = collect_events(stream.transform_stream(native_events()))
+
+    assert isinstance(events[-1], FunctionCallSSE)
+    assert not any(isinstance(e, MessageChunkSSE) for e in events)
