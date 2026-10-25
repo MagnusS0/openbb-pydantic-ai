@@ -7,10 +7,10 @@ authors = [
 ]
 license = { text = "MIT" }
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "openbb-ai>=2.2.0",
-    "pydantic-ai-slim[ui]>=1.63.0",
+    "pydantic-ai-slim[ui]>=2.61.0",
 ]
 
 [project.optional-dependencies]
