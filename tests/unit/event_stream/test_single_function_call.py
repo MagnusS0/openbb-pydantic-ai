@@ -97,6 +97,12 @@ def _function_calls(events: list[Any]) -> list[FunctionCallSSE]:
     return [e for e in events if isinstance(e, FunctionCallSSE)]
 
 
+def _extra_state(call: FunctionCallSSE) -> dict[str, Any]:
+    extra_state = call.data.extra_state
+    assert extra_state is not None
+    return extra_state
+
+
 def test_widget_requests_win_over_mcp_calls(widget_collection, make_request) -> None:
     stream, widget_tool = _build_stream(widget_collection, make_request)
 
@@ -108,7 +114,7 @@ def test_widget_requests_win_over_mcp_calls(widget_collection, make_request) -> 
 
     calls = _function_calls(events)
     assert [c.data.function for c in calls] == [GET_WIDGET_DATA_TOOL_NAME]
-    assert [tc["tool_call_id"] for tc in calls[0].data.extra_state["tool_calls"]] == [
+    assert [tc["tool_call_id"] for tc in _extra_state(calls[0])["tool_calls"]] == [
         "w-1"
     ]
     assert not stream._state.has_tool_call("m-1")
@@ -124,7 +130,7 @@ def test_only_first_mcp_call_is_emitted(widget_collection, make_request) -> None
     calls = _function_calls(events)
     assert [c.data.function for c in calls] == [EXECUTE_MCP_TOOL_NAME]
     assert calls[0].data.input_arguments["tool_name"] == "mcp_a"
-    assert [tc["tool_call_id"] for tc in calls[0].data.extra_state["tool_calls"]] == [
+    assert [tc["tool_call_id"] for tc in _extra_state(calls[0])["tool_calls"]] == [
         "m-1"
     ]
 
@@ -180,7 +186,7 @@ def test_function_call_snapshot_carries_request_context(
 
     events = collect_events(stream.handle_run_result(_deferred((widget_tool, "w-1"))))
 
-    extra_state = _function_calls(events)[0].data.extra_state
+    extra_state = _extra_state(_function_calls(events)[0])
     assert extra_state[CONTEXT_SNAPSHOT_EXTRA_STATE_KEY] == {"timezone": "UTC"}
 
 

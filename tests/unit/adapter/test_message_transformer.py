@@ -149,9 +149,11 @@ def test_transform_batch_derives_deterministic_id_when_result_lacks_tool_calls()
     transformed = MessageTransformer().transform_batch([call_message, result_message])
 
     parts = [part for message in transformed for part in message.parts]
-    assert [type(part) for part in parts] == [ToolCallPart, ToolReturnPart]
-    assert parts[0].tool_call_id == parts[1].tool_call_id
-    assert parts[0].tool_call_id == _derived_id("get_widget_data", 0)
+    call_part, return_part = parts
+    assert isinstance(call_part, ToolCallPart)
+    assert isinstance(return_part, ToolReturnPart)
+    assert call_part.tool_call_id == return_part.tool_call_id
+    assert call_part.tool_call_id == _derived_id("get_widget_data", 0)
 
 
 def test_transform_batch_skips_partial_batched_call_when_ids_missing(caplog) -> None:
