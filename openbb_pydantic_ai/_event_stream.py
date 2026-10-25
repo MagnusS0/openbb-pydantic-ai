@@ -46,6 +46,7 @@ from pydantic_core import to_json as _pydantic_to_json
 
 from openbb_pydantic_ai._config import (
     CHART_TOOL_NAME,
+    CONTEXT_SNAPSHOT_EXTRA_STATE_KEY,
     EVENT_TYPE_ERROR,
     EVENT_TYPE_THINKING,
     EVENT_TYPE_WARNING,
@@ -56,7 +57,7 @@ from openbb_pydantic_ai._config import (
     PDF_QUERY_TOOL_NAME,
     TABLE_TOOL_NAME,
 )
-from openbb_pydantic_ai._dependencies import OpenBBDeps
+from openbb_pydantic_ai._dependencies import OpenBBDeps, build_context_snapshot
 from openbb_pydantic_ai._event_stream_components import StreamState
 from openbb_pydantic_ai._event_stream_formatters import _format_meta_tool_call_args
 from openbb_pydantic_ai._event_stream_helpers import (
@@ -105,6 +106,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     # Simple state flags
     _deferred_results_emitted: bool = field(init=False, default=False)
     _final_output: str | None = field(init=False, default=None)
+    _function_call_emitted: bool = field(init=False, default=False)
 
     def encode_event(self, event: SSE) -> str:
         return _encode_sse(event)
@@ -268,6 +270,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         agent_tool: AgentTool,
         args: dict[str, Any],
         capsule_payload: str | None = None,
+        context_snapshot: dict[str, Any] | None = None,
     ) -> FunctionCallSSE:
         server_identifier = agent_tool.server_id or agent_tool.url
         input_arguments: dict[str, Any] = {
@@ -280,7 +283,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         if agent_tool.url:
             input_arguments.setdefault("url", agent_tool.url)
 
-        extra_state = {
+        extra_state: dict[str, Any] = {
             "tool_calls": [
                 {
                     "tool_call_id": tool_call_id,
@@ -290,6 +293,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             ],
             "persist_tool_result": True,
         }
+        if context_snapshot is not None:
+            extra_state[CONTEXT_SNAPSHOT_EXTRA_STATE_KEY] = context_snapshot
         if capsule_payload is not None:
             extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY] = capsule_payload
 
@@ -435,44 +440,62 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     async def _handle_deferred_tool_requests(
         self, output: DeferredToolRequests
     ) -> AsyncIterator[SSE]:
-        """Process deferred tool requests and yield widget request events."""
+        """Process deferred tool requests and yield at most one function call.
+
+        The Workspace awaits each `copilotFunctionCall` inline and processes a
+        whole follow-up stream before reading the rest of this one, so extra
+        calls would be answered out of order and dropped calls never enter
+        history. Widget requests win (batched into one `get_widget_data`);
+        otherwise only the first MCP call is emitted. The call is always the
+        last event of the stream.
+        """
+        if self._function_call_emitted:
+            logger.debug("Dropping deferred tool requests: function call already sent")
+            return
+
         widget_requests: list[WidgetRequest] = []
-        tool_call_ids: list[dict[str, Any]] = []
-        mcp_requests: list[tuple[str, AgentTool, dict[str, Any]]] = []
-        capsule_payload = self._build_local_tool_capsule_payload()
-        capsule_attached = False
+        widget_calls: list[tuple[ToolCallPart, str, dict[str, Any], Widget]] = []
+        mcp_requests: list[tuple[ToolCallPart, str, AgentTool, dict[str, Any]]] = []
 
-        expanded_calls = self._expand_deferred_calls(output)
-
-        for call in expanded_calls:
+        for call in self._expand_deferred_calls(output):
             raw_args = normalize_args(call.args)
             effective_tool_name, effective_args = self._extract_effective_tool_call(
                 call.tool_name, raw_args
             )
 
             widget = self.widget_registry.find_by_tool_name(effective_tool_name)
-            if widget is None:
-                agent_tool = self._find_agent_tool(effective_tool_name)
-                if agent_tool is None:
-                    continue
-
-                self._state.register_tool_call(
-                    tool_call_id=call.tool_call_id,
-                    tool_name=effective_tool_name,
-                    args=effective_args,
-                    agent_tool=agent_tool,
-                )
-
-                mcp_requests.append((call.tool_call_id, agent_tool, effective_args))
+            if widget is not None:
+                widget_calls.append((call, effective_tool_name, effective_args, widget))
                 continue
 
-            widget_requests.append(
-                WidgetRequest(widget=widget, input_arguments=effective_args)
-            )
+            agent_tool = self._find_agent_tool(effective_tool_name)
+            if agent_tool is not None:
+                mcp_requests.append(
+                    (call, effective_tool_name, agent_tool, effective_args)
+                )
+
+        if widget_calls:
+            for call, *_ in mcp_requests:
+                logger.debug(
+                    "Dropping MCP call '%s' (%s): widget requests take precedence",
+                    call.tool_name,
+                    call.tool_call_id,
+                )
+        elif len(mcp_requests) > 1:
+            for call, *_ in mcp_requests[1:]:
+                logger.debug(
+                    "Dropping MCP call '%s' (%s): only one function call per stream",
+                    call.tool_name,
+                    call.tool_call_id,
+                )
+
+        tool_call_ids: list[dict[str, Any]] = []
+        for call, tool_name, args, widget in widget_calls:
+            widget_requests.append(WidgetRequest(widget=widget, input_arguments=args))
             self._state.register_tool_call(
                 tool_call_id=call.tool_call_id,
-                tool_name=effective_tool_name,
-                args=effective_args,
+                tool_name=tool_name,
+                args=args,
                 widget=widget,
             )
             tool_call_ids.append(
@@ -480,7 +503,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     "tool_call_id": call.tool_call_id,
                     "widget_uuid": str(widget.uuid),
                     "widget_id": widget.widget_id,
-                    "tool_name": effective_tool_name,
+                    "tool_name": tool_name,
                 }
             )
 
@@ -488,33 +511,58 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
             details = {
                 "Origin": widget.origin,
                 "Widget Id": widget.widget_id,
-                **format_args(effective_args),
+                **format_args(args),
             }
             yield reasoning_step(
                 f"Requesting widget '{widget.name}'",
                 details=details,
             )
 
-        if widget_requests:
-            sse = get_widget_data(widget_requests)
-            extra_state: dict[str, Any] = {
-                "tool_calls": tool_call_ids,
-                "persist_tool_result": True,
-            }
-            if capsule_payload is not None:
-                extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY] = capsule_payload
-                capsule_attached = True
-            sse.data.extra_state = extra_state
-            yield sse
+        if not widget_requests and not mcp_requests:
+            return
 
-        for tool_call_id, agent_tool, args in mcp_requests:
+        mcp_request = None if widget_requests else mcp_requests[0]
+        if mcp_request is not None:
+            call, tool_name, agent_tool, args = mcp_request
+            self._state.register_tool_call(
+                tool_call_id=call.tool_call_id,
+                tool_name=tool_name,
+                args=args,
+                agent_tool=agent_tool,
+            )
+
+        # Everything buffered must precede the call, which has to be last.
+        for event in self._drain_pending_events():
+            yield event
+
+        capsule_payload = self._build_local_tool_capsule_payload()
+        context_snapshot = (
+            build_context_snapshot(self.run_input) if self.run_input else None
+        )
+        self._function_call_emitted = True
+
+        if mcp_request is not None:
+            call, _, agent_tool, args = mcp_request
             yield self._build_mcp_function_call(
-                tool_call_id=tool_call_id,
+                tool_call_id=call.tool_call_id,
                 agent_tool=agent_tool,
                 args=args,
-                capsule_payload=capsule_payload if not capsule_attached else None,
+                capsule_payload=capsule_payload,
+                context_snapshot=context_snapshot,
             )
-            capsule_attached = True
+            return
+
+        sse = get_widget_data(widget_requests)
+        extra_state: dict[str, Any] = {
+            "tool_calls": tool_call_ids,
+            "persist_tool_result": True,
+        }
+        if context_snapshot is not None:
+            extra_state[CONTEXT_SNAPSHOT_EXTRA_STATE_KEY] = context_snapshot
+        if capsule_payload is not None:
+            extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY] = capsule_payload
+        sse.data.extra_state = extra_state
+        yield sse
 
     @staticmethod
     def _extract_effective_tool_call(
@@ -727,7 +775,8 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         return pack_tool_history(entries)
 
-    async def after_stream(self) -> AsyncIterator[SSE]:
+    def _drain_pending_events(self) -> Iterator[SSE]:
+        """Flush buffered thinking, parser text, artifacts and citations in order."""
         if self._state.has_thinking():
             content = self._state.get_thinking()
             if content:
@@ -736,8 +785,7 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
 
         # Flush any remaining text in the parser buffer
         if self._state.has_streamed_text or self._final_output is None:
-            for event in self._stream_parser.flush(self._state.record_text_streamed):
-                yield event
+            yield from self._stream_parser.flush(self._state.record_text_streamed)
 
         while self._queued_viz_artifacts:
             yield self._queued_viz_artifacts.popleft()
@@ -746,6 +794,14 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
         drained_citations = self._state.drain_citations()
         if drained_citations:
             yield citations(drained_citations)
+
+    async def after_stream(self) -> AsyncIterator[SSE]:
+        # The function call must be the last event of the stream.
+        if self._function_call_emitted:
+            return
+
+        for event in self._drain_pending_events():
+            yield event
 
         if self._final_output and not self._state.has_streamed_text:
             for event in self._text_events_with_artifacts(self._final_output):

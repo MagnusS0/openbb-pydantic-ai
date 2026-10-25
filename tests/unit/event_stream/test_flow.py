@@ -63,6 +63,16 @@ def test_event_stream_emits_widget_requests_and_citations(
     assert events[1].event == "copilotFunctionCall"
     assert stream._state.has_tool_call("call-1")
 
+    # The function call ends its stream, so the result is handled as if it came
+    # from a later stream that already knows the call.
+    stream = OpenBBAIEventStream(run_input=request, widget_registry=registry)
+    stream._state.register_tool_call(
+        tool_call_id="call-1",
+        tool_name=tool_name,
+        args={"symbol": "AAPL"},
+        widget=widget,
+    )
+
     tool_result_event = FunctionToolResultEvent(
         part=ToolReturnPart(
             tool_name=tool_name,

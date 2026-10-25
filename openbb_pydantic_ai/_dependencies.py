@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -14,6 +15,8 @@ from openbb_ai.models import (
 )
 
 from openbb_pydantic_ai._utils import iter_widget_collection
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -65,3 +68,23 @@ def build_deps_from_request(request: QueryRequest) -> OpenBBDeps:
         timezone=request.timezone,
         state=ws.model_dump(exclude_none=True) if ws is not None else {},
     )
+
+
+def build_context_snapshot(request: QueryRequest) -> dict[str, Any]:
+    """Compact request context to round-trip via a function call's `extra_state`.
+
+    The Workspace omits timezone, urls and workspace_state from the follow-up
+    request that carries a function call result. Only the dashboard info is kept
+    from the workspace state since it is all the instructions render.
+    """
+    snapshot: dict[str, Any] = {"timezone": request.timezone}
+    if request.urls:
+        snapshot["urls"] = list(request.urls)
+    ws = request.workspace_state
+    if ws is not None and ws.current_dashboard_info is not None:
+        snapshot["workspace_state"] = {
+            "current_dashboard_info": ws.current_dashboard_info.model_dump(
+                mode="json", exclude_none=True
+            )
+        }
+    return snapshot
