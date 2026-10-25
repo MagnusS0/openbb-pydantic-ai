@@ -62,7 +62,11 @@ from openbb_pydantic_ai._config import (
     LOCAL_TOOL_CAPSULE_REHYDRATED_KEY,
     LOCAL_TOOL_CAPSULE_RESULT_KEY,
 )
-from openbb_pydantic_ai._dependencies import OpenBBDeps, build_deps_from_request
+from openbb_pydantic_ai._dependencies import (
+    OpenBBDeps,
+    build_deps_from_request,
+    restore_request_context,
+)
 from openbb_pydantic_ai._event_stream import OpenBBAIEventStream
 from openbb_pydantic_ai._local_tool_capsule import (
     LocalToolEntry,
@@ -177,6 +181,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     )
 
     def __post_init__(self) -> None:
+        self.run_input = restore_request_context(self.run_input)
         (
             self._base_messages,
             self._pending_results,

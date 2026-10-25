@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from openbb_ai.models import (
+    LlmClientFunctionCall,
+    LlmClientFunctionCallResultMessage,
+    LlmClientMessage,
+    LlmMessage,
     QueryRequest,
     RawContext,
     Widget,
@@ -14,6 +20,7 @@ from openbb_ai.models import (
     WorkspaceState,
 )
 
+from openbb_pydantic_ai._config import CONTEXT_SNAPSHOT_EXTRA_STATE_KEY
 from openbb_pydantic_ai._utils import iter_widget_collection
 
 logger = logging.getLogger(__name__)
@@ -88,3 +95,61 @@ def build_context_snapshot(request: QueryRequest) -> dict[str, Any]:
             )
         }
     return snapshot
+
+
+def _trailing_chain_snapshot(messages: Sequence[LlmMessage]) -> dict[str, Any] | None:
+    """Return the snapshot on the trailing result of the current chain.
+
+    Only a final result that directly follows its call qualifies, so snapshots
+    from earlier chains or from late results after assistant text are never used.
+    """
+    if len(messages) < 2:
+        return None
+    call, result = messages[-2], messages[-1]
+    if not (
+        isinstance(result, LlmClientFunctionCallResultMessage)
+        and isinstance(call, LlmClientMessage)
+        and isinstance(call.content, LlmClientFunctionCall)
+        and call.content.function == result.function
+    ):
+        return None
+    snapshot = (result.extra_state or {}).get(CONTEXT_SNAPSHOT_EXTRA_STATE_KEY)
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def restore_request_context(request: QueryRequest) -> QueryRequest:
+    """Fill timezone, urls and workspace_state a follow-up request omitted.
+
+    Values present on the request always win.
+    """
+    snapshot = _trailing_chain_snapshot(request.messages)
+    if snapshot is None:
+        return request
+
+    updates: dict[str, Any] = {}
+
+    timezone = snapshot.get("timezone")
+    if "timezone" not in request.model_fields_set and isinstance(timezone, str):
+        try:
+            ZoneInfo(timezone)
+        except Exception:  # noqa: BLE001
+            logger.debug("Ignoring invalid timezone in context snapshot")
+        else:
+            updates["timezone"] = timezone
+
+    urls = snapshot.get("urls")
+    if (
+        request.urls is None
+        and isinstance(urls, list)
+        and all(isinstance(url, str) for url in urls)
+    ):
+        updates["urls"] = urls
+
+    ws = snapshot.get("workspace_state")
+    if request.workspace_state is None and isinstance(ws, dict):
+        try:
+            updates["workspace_state"] = WorkspaceState.model_validate(ws)
+        except ValueError:
+            logger.debug("Ignoring invalid workspace_state in context snapshot")
+
+    return request.model_copy(update=updates) if updates else request
