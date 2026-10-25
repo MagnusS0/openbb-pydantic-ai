@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openbb_ai.models import LlmClientMessage, RoleEnum
+from pydantic_ai.ui import DEFAULT_ALLOWED_CONTENT_TYPES
 
 from openbb_pydantic_ai import OpenBBAIAdapter
 from openbb_pydantic_ai import _adapter as adapter_module
@@ -26,7 +27,10 @@ async def test_from_request_preprocesses_messages(mocker, make_request) -> None:
     )
 
     class _RequestStub:
-        headers = {"accept": "text/event-stream"}
+        headers = {
+            "accept": "text/event-stream",
+            "content-type": "application/json",
+        }
 
         def __init__(self, payload: bytes):
             self._payload = payload
@@ -69,6 +73,12 @@ async def test_dispatch_request_uses_from_request(mocker) -> None:
         agent=agent,
         enable_progressive_tool_discovery=False,
         enable_local_tool_history_capsule=True,
+        manage_system_prompt="server",
+        allowed_file_url_schemes=frozenset({"http", "https"}),
+        allowed_file_url_force_download=frozenset(),
+        allow_uploaded_files=False,
+        strip_workspace_refs=True,
+        allowed_content_types=DEFAULT_ALLOWED_CONTENT_TYPES,
     )
     adapter.run_stream.assert_called_once()
     adapter.streaming_response.assert_called_once_with(stream)

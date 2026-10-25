@@ -64,7 +64,7 @@ def test_event_stream_emits_widget_requests_and_citations(
     assert stream._state.has_tool_call("call-1")
 
     tool_result_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=tool_name,
             tool_call_id="call-1",
             content={
@@ -111,7 +111,7 @@ def test_non_widget_metadata_citations_are_emitted(make_request) -> None:
         details=[{"section": "Introduction"}],
     )
     result_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name="pdf_query",
             tool_call_id="pdf-call-1",
             content="## Introduction\n\nContent",

@@ -28,7 +28,10 @@ pytestmark = pytest.mark.regression_contract
 
 
 class _RequestStub:
-    headers = {"accept": "text/event-stream"}
+    headers = {
+        "accept": "text/event-stream",
+        "content-type": "application/json",
+    }
 
     def __init__(self, payload: bytes) -> None:
         self._payload = payload

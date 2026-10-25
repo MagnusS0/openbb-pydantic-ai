@@ -51,7 +51,7 @@ def test_non_widget_tool_calls_show_in_reasoning(make_request) -> None:
     assert "list(len=3" in detail_entry["data"]
 
     result_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name="internal_tool",
             tool_call_id="tool-42",
             content=[{"name": "address", "description": "Address"}],
@@ -109,7 +109,7 @@ def test_widget_result_without_structured_data_falls_back_to_reasoning(
     )
 
     result_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name=tool_name,
             tool_call_id="call-42",
             content={"unexpected": "value"},
@@ -147,7 +147,7 @@ def test_error_strings_from_tool_results_emit_status_updates(make_request) -> No
     }
 
     result_event = FunctionToolResultEvent(
-        result=ToolReturnPart(
+        part=ToolReturnPart(
             tool_name="execute_agent_tool",
             tool_call_id="call-error",
             content=error_content,
@@ -163,3 +163,23 @@ def test_error_strings_from_tool_results_emit_status_updates(make_request) -> No
     ]
     assert error_updates
     assert not any(isinstance(e, MessageChunkSSE) for e in events)
+
+
+def test_retried_tool_result_emits_error_step(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    result_event = FunctionToolResultEvent(
+        part=ToolReturnPart(
+            tool_name="internal_tool",
+            tool_call_id="tool-retry",
+            content="Invalid arguments, try again",
+            outcome="retried",
+        )
+    )
+
+    events = collect_events(stream.handle_function_tool_result(result_event))
+    assert len(events) == 1
+    assert isinstance(events[0], StatusUpdateSSE)
+    assert events[0].data.message == "Invalid arguments, try again"
+    assert events[0].data.eventType == "ERROR"
