@@ -88,11 +88,13 @@ class StreamParser:
     def flush(self, on_text_streamed: Callable[[], None] | None = None) -> list[SSE]:
         """Flush any remaining buffered text."""
         events = []
-        if self._placeholder_buffer:
-            events.append(
-                self._message_chunk(self._placeholder_buffer, on_text_streamed)
-            )
-            self._placeholder_buffer = ""
+        # Never surface a raw placeholder token as visible text.
+        text = self._placeholder_buffer
+        for token in self.tokens:
+            text = text.replace(token, "")
+        if text:
+            events.append(self._message_chunk(text, on_text_streamed))
+        self._placeholder_buffer = ""
         return events
 
     def _message_chunk(
