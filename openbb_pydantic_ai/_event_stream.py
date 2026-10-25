@@ -33,13 +33,11 @@ from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
-    RetryPromptPart,
     TextPart,
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
     ToolCallPart,
-    ToolReturnPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.ui import UIEventStream
@@ -613,9 +611,9 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
     async def handle_function_tool_result(
         self, event: FunctionToolResultEvent
     ) -> AsyncIterator[SSE]:
-        result_part = event.result
+        result_part = event.part
 
-        if isinstance(result_part, RetryPromptPart):
+        if result_part.outcome == "retried":
             if result_part.content:
                 content = result_part.content
                 message = (
@@ -624,9 +622,6 @@ class OpenBBAIEventStream(UIEventStream[QueryRequest, SSE, OpenBBDeps, Any]):
                     else _pydantic_to_json(content, serialize_unknown=True).decode()
                 )
                 yield reasoning_step(message, event_type=EVENT_TYPE_ERROR)
-            return
-
-        if not isinstance(result_part, ToolReturnPart):
             return
 
         tool_call_id = result_part.tool_call_id

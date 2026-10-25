@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from openbb_ai.models import LlmClientFunctionCallResultMessage
 from pydantic_core import from_json as _from_json
@@ -32,13 +32,10 @@ def serialize_result(
         to_jsonable_python(item, exclude_none=True) for item in message.data
     ]
 
-    content: SerializedContent = cast(
-        SerializedContent,
-        {
-            "input_arguments": message.input_arguments,
-            "data": data,
-        },
-    )
+    content: SerializedContent = {
+        "input_arguments": message.input_arguments,
+        "data": data,
+    }
     if message.extra_state:
         content["extra_state"] = message.extra_state
     return content

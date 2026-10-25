@@ -7,7 +7,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Callable, Protocol, cast, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 from zoneinfo import ZoneInfo
 
 from openbb_ai.models import (
@@ -26,16 +34,24 @@ from openbb_ai.models import (
     WidgetCollection,
 )
 from pydantic import ValidationError
+from pydantic_ai import CancellationToken
 from pydantic_ai.agent import AbstractAgent, AgentMetadata
-from pydantic_ai.agent.abstract import Instructions
-from pydantic_ai.builtin_tools import AbstractBuiltinTool
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.agent.abstract import AgentInstructions
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ForceDownloadMode, ModelMessage
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.output import OutputSpec
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
-from pydantic_ai.ui import OnCompleteFunc, UIAdapter
+from pydantic_ai.ui import (
+    DEFAULT_ALLOWED_CONTENT_TYPES,
+    OnCancelFunc,
+    OnCompleteFunc,
+    UIAdapter,
+)
+from pydantic_ai.ui._adapter import _check_content_type
 from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 from typing_extensions import override
 
 from openbb_pydantic_ai._config import (
@@ -146,9 +162,16 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         agent: AbstractAgent[OpenBBDeps, Any],
         enable_progressive_tool_discovery: bool = True,
         enable_local_tool_history_capsule: bool = True,
+        manage_system_prompt: Literal["server", "client"] = "server",
+        allowed_file_url_schemes: frozenset[str] = frozenset({"http", "https"}),
+        allowed_file_url_force_download: frozenset[ForceDownloadMode] = frozenset(),
+        allow_uploaded_files: bool = False,
+        strip_workspace_refs: bool = True,
+        allowed_content_types: frozenset[str] | None = DEFAULT_ALLOWED_CONTENT_TYPES,
         **kwargs: Any,
     ) -> OpenBBAIAdapter:
         """Create adapter and preprocess PDF payloads before message transforms."""
+        _check_content_type(request, allowed_content_types)
         run_input = cls.build_run_input(await request.body())
         run_input = await cls._preprocess_run_input(run_input)
         adapter = cls(
@@ -157,6 +180,12 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             accept=request.headers.get("accept"),
             enable_progressive_tool_discovery=enable_progressive_tool_discovery,
             enable_local_tool_history_capsule=enable_local_tool_history_capsule,
+            manage_system_prompt=manage_system_prompt,
+            allowed_file_url_schemes=allowed_file_url_schemes,
+            allowed_file_url_force_download=allowed_file_url_force_download,
+            allow_uploaded_files=allow_uploaded_files,
+            strip_workspace_refs=strip_workspace_refs,
+            **kwargs,
         )
         await adapter._rehydrate_local_capsules()
         return adapter
@@ -456,9 +485,9 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             self.__dict__.pop(cache_name, None)
 
     def _merge_instructions(
-        self, instructions: Instructions[OpenBBDeps]
-    ) -> Instructions[OpenBBDeps]:
-        combined: Instructions[OpenBBDeps] = self.instructions
+        self, instructions: AgentInstructions[OpenBBDeps]
+    ) -> AgentInstructions[OpenBBDeps]:
+        combined: AgentInstructions[OpenBBDeps] = self.instructions
         if instructions:
             if isinstance(instructions, str):
                 # Avoid duplication if caller already merged context
@@ -779,20 +808,32 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         agent: AbstractAgent[OpenBBDeps, Any],
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
         model: Model | KnownModelName | str | None = None,
-        instructions: Instructions[OpenBBDeps] = None,
+        instructions: AgentInstructions[OpenBBDeps] = None,
         deps: OpenBBDeps | None = None,
         output_type: OutputSpec[Any] | None = None,
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[OpenBBDeps] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
+        capabilities: Sequence[AbstractCapability[OpenBBDeps]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         enable_progressive_tool_discovery: bool = True,
         enable_local_tool_history_capsule: bool = True,
         on_complete: OnCompleteFunc[SSE] | None = None,
+        on_cancel: OnCancelFunc[SSE] | None = None,
+        manage_system_prompt: Literal["server", "client"] = "server",
+        allowed_file_url_schemes: frozenset[str] = frozenset({"http", "https"}),
+        allowed_file_url_force_download: frozenset[ForceDownloadMode] = frozenset(),
+        allow_uploaded_files: bool = False,
+        strip_workspace_refs: bool = True,
+        allowed_content_types: frozenset[str] | None = DEFAULT_ALLOWED_CONTENT_TYPES,
         **kwargs: Any,
     ) -> "Response":
         """Handle a request and return a streaming response.
@@ -807,9 +848,13 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             Existing model message history.
         deferred_tool_results : DeferredToolResults | None, default None
             Deferred tool results for continuation.
+        conversation_id : str | None, default None
+            ID of the conversation this run belongs to.
+        run_id : str | None, default None
+            Optional ID for this agent run.
         model : Model | KnownModelName | str | None, default None
             Optional model override.
-        instructions : Instructions[OpenBBDeps], default None
+        instructions : AgentInstructions[OpenBBDeps], default None
             Additional run instructions.
         deps : OpenBBDeps | None, default None
             Optional dependency overrides.
@@ -819,6 +864,10 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             Optional model settings override.
         usage_limits : UsageLimits | None, default None
             Optional token/request limits.
+        cancellation_token : CancellationToken | None, default None
+            Optional token for cancelling the run from another task.
+        timeout : float | None, default None
+            Optional maximum duration of the whole run, in seconds.
         usage : RunUsage | None, default None
             Optional usage accumulator.
         metadata : AgentMetadata[OpenBBDeps] | None, default None
@@ -827,14 +876,32 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             Whether to infer the agent name.
         toolsets : Sequence[AbstractToolset[OpenBBDeps]] | None, default None
             Additional runtime toolsets.
-        builtin_tools : Sequence[AbstractBuiltinTool] | None, default None
-            Additional builtin tools.
+        capabilities : Sequence[AbstractCapability[OpenBBDeps]] | None, default None
+            Additional capabilities (e.g. ``NativeTool``) for this run.
+        workspace : WorkspaceBackend | WorkspaceRef | Literal["new"] | None
+            Optional workspace for this run.
         enable_progressive_tool_discovery : bool, default True
             Whether to enable progressive tool discovery for this request.
         enable_local_tool_history_capsule : bool, default True
             Whether to capture and rehydrate local-tool history capsules.
         on_complete : OnCompleteFunc[SSE] | None, default None
             Optional completion callback.
+        on_cancel : OnCancelFunc[SSE] | None, default None
+            Optional callback invoked when the run is cancelled.
+        manage_system_prompt : Literal["server", "client"], default "server"
+            Who owns the system prompt.
+        allowed_file_url_schemes : frozenset[str], default {"http", "https"}
+            URL schemes allowed for file URL parts from the client.
+        allowed_file_url_force_download : frozenset[ForceDownloadMode]
+            Additional ``force_download`` values allowed on client file URLs.
+        allow_uploaded_files : bool, default False
+            Whether to honor uploaded-file references from the client.
+        strip_workspace_refs : bool, default True
+            Whether to reset workspace refs on client-submitted messages.
+        allowed_content_types : frozenset[str] | None
+            Request media types to accept (CSRF control); ``None`` skips the check.
+        **kwargs : Any
+            Forwarded to ``from_request``.
 
         Returns
         -------
@@ -860,6 +927,13 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 agent=agent,
                 enable_progressive_tool_discovery=enable_progressive_tool_discovery,
                 enable_local_tool_history_capsule=enable_local_tool_history_capsule,
+                manage_system_prompt=manage_system_prompt,
+                allowed_file_url_schemes=allowed_file_url_schemes,
+                allowed_file_url_force_download=allowed_file_url_force_download,
+                allow_uploaded_files=allow_uploaded_files,
+                strip_workspace_refs=strip_workspace_refs,
+                allowed_content_types=allowed_content_types,
+                **kwargs,
             )
         except ValidationError as e:  # pragma: no cover
             return Response(
@@ -873,6 +947,10 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             adapter.run_stream(
                 message_history=message_history,
                 deferred_tool_results=deferred_tool_results,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                cancellation_token=cancellation_token,
+                timeout=timeout,
                 deps=deps_to_forward,
                 output_type=output_type,
                 model=model,
@@ -883,7 +961,8 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 metadata=metadata,
                 infer_name=infer_name,
                 toolsets=toolsets,
-                builtin_tools=builtin_tools,
+                capabilities=capabilities,
+                workspace=workspace,
                 on_complete=on_complete,
             ),
         )
@@ -893,11 +972,11 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         *,
         deps: OpenBBDeps | None,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None,
-        instructions: Instructions[OpenBBDeps],
+        instructions: AgentInstructions[OpenBBDeps],
     ) -> tuple[
         OpenBBDeps,
         Sequence[AbstractToolset[OpenBBDeps]] | None,
-        Instructions[OpenBBDeps],
+        AgentInstructions[OpenBBDeps],
     ]:
         """Resolve defaults shared by stream entrypoints."""
         resolved_deps: OpenBBDeps = deps or self.deps
@@ -912,16 +991,21 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         output_type: OutputSpec[Any] | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
         model: Model | KnownModelName | str | None = None,
-        instructions: Instructions[OpenBBDeps] = None,
+        instructions: AgentInstructions[OpenBBDeps] = None,
         deps: OpenBBDeps | None = None,
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[OpenBBDeps] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
+        capabilities: Sequence[AbstractCapability[OpenBBDeps]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
     ):
         """
         Run the agent with OpenBB-specific defaults for
@@ -937,16 +1021,21 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
+            conversation_id=conversation_id,
+            run_id=run_id,
             model=model,
             instructions=combined_instructions,
             deps=resolved_deps,
             model_settings=model_settings,
             usage_limits=usage_limits,
+            cancellation_token=cancellation_token,
+            timeout=timeout,
             usage=usage,
             metadata=metadata,
             infer_name=infer_name,
             toolsets=toolsets,
-            builtin_tools=builtin_tools,
+            capabilities=capabilities,
+            workspace=workspace,
         )
 
     @override
@@ -956,17 +1045,23 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
         output_type: OutputSpec[Any] | None = None,
         message_history: Sequence[ModelMessage] | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
         model: Model | KnownModelName | str | None = None,
-        instructions: Instructions[OpenBBDeps] = None,
+        instructions: AgentInstructions[OpenBBDeps] = None,
         deps: OpenBBDeps | None = None,
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
+        cancellation_token: CancellationToken | None = None,
+        timeout: float | None = None,
         usage: RunUsage | None = None,
         metadata: AgentMetadata[OpenBBDeps] | None = None,
         infer_name: bool = True,
         toolsets: Sequence[AbstractToolset[OpenBBDeps]] | None = None,
-        builtin_tools: Sequence[AbstractBuiltinTool] | None = None,
+        capabilities: Sequence[AbstractCapability[OpenBBDeps]] | None = None,
+        workspace: WorkspaceBackend | WorkspaceRef | Literal["new"] | None = None,
         on_complete: OnCompleteFunc[SSE] | None = None,
+        on_cancel: OnCancelFunc[SSE] | None = None,
     ):
         """Run the agent and stream protocol-specific events with OpenBB defaults."""
         resolved_deps: OpenBBDeps = deps or self.deps
@@ -975,15 +1070,21 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
             output_type=output_type,
             message_history=message_history,
             deferred_tool_results=deferred_tool_results,
+            conversation_id=conversation_id,
+            run_id=run_id,
             model=model,
             instructions=instructions,
             deps=resolved_deps,
             model_settings=model_settings,
             usage_limits=usage_limits,
+            cancellation_token=cancellation_token,
+            timeout=timeout,
             usage=usage,
             metadata=metadata,
             infer_name=infer_name,
             toolsets=toolsets,
-            builtin_tools=builtin_tools,
+            capabilities=capabilities,
+            workspace=workspace,
             on_complete=on_complete,
+            on_cancel=on_cancel,
         )
