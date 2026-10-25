@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Any, Protocol, TypedDict
-
-if sys.version_info >= (3, 11):
-    from typing import NotRequired
-else:
-    from typing_extensions import NotRequired
 
 
 class SerializedContent(TypedDict):
@@ -16,7 +10,6 @@ class SerializedContent(TypedDict):
 
     input_arguments: dict[str, Any]
     data: list[Any]
-    extra_state: NotRequired[dict[str, Any]]
 
 
 class TextStreamCallback(Protocol):

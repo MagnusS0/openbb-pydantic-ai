@@ -25,8 +25,9 @@ def serialize_result(
     Returns
     -------
     SerializedContent
-        A typed dictionary containing input_arguments, data, and
-        optionally extra_state
+        A typed dictionary containing input_arguments and data. ``extra_state``
+        is deliberately excluded: it is client round-trip state (tool call ids,
+        local tool capsule) and must not be visible to the model.
     """
     data: list[Any] = [
         to_jsonable_python(item, exclude_none=True) for item in message.data
@@ -36,8 +37,6 @@ def serialize_result(
         "input_arguments": message.input_arguments,
         "data": data,
     }
-    if message.extra_state:
-        content["extra_state"] = message.extra_state
     return content
 
 

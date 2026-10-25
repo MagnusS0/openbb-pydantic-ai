@@ -110,3 +110,54 @@ async def test_rehydrate_injects_rehydrated_local_tool_history(
     assert calls[1].tool_call_id == "deferred-1"
     assert returns[1].tool_name == "call_tools"
     assert returns[1].tool_call_id == "deferred-1"
+
+
+async def test_extra_state_is_not_visible_in_tool_return_content(
+    make_request, widget_collection
+) -> None:
+    widget = widget_collection.primary[0]
+    capsule = pack_tool_history(
+        [LocalToolEntry(tool_call_id="local-1", tool_name="list_tools", result="x")]
+    )
+    args = {
+        "data_sources": [
+            {"widget_uuid": str(widget.uuid), "input_args": {"symbol": "AAPL"}}
+        ]
+    }
+    messages = [
+        LlmClientMessage(role=RoleEnum.human, content="Show me AAPL"),
+        LlmClientMessage(
+            role=RoleEnum.ai,
+            content=LlmClientFunctionCall(
+                function=GET_WIDGET_DATA_TOOL_NAME, input_arguments=args
+            ),
+        ),
+        LlmClientFunctionCallResultMessage(
+            function=GET_WIDGET_DATA_TOOL_NAME,
+            input_arguments=args,
+            data=[ClientCommandResult(status="success", message=None)],
+            extra_state={
+                "tool_calls": [
+                    {
+                        "tool_call_id": "deferred-1",
+                        "tool_name": build_widget_tool_name(widget),
+                    }
+                ],
+                LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY: capsule,
+            },
+        ),
+    ]
+    request = make_request(messages, widgets=widget_collection)
+
+    adapter = await OpenBBAIAdapter.from_request(
+        cast(Any, _RequestStub(request.model_dump_json().encode())),
+        agent=MagicMock(),
+    )
+
+    deferred = [r for r in tool_return_parts(adapter) if r.tool_call_id == "deferred-1"]
+    assert deferred
+    for part in deferred:
+        assert isinstance(part.content, dict)
+        assert set(part.content) == {"input_arguments", "data"}
+        assert LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY not in str(part.content)
+        assert "extra_state" not in str(part.content)
