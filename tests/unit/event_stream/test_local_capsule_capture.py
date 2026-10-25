@@ -45,7 +45,7 @@ def _build_stream(widget_collection, make_request) -> tuple[OpenBBAIEventStream,
     return stream, tool_name
 
 
-def test_local_capsule_attached_once_and_preserves_tool_calls(
+def test_local_capsule_rides_on_the_single_emitted_call(
     widget_collection, make_request
 ) -> None:
     stream, widget_tool_name = _build_stream(widget_collection, make_request)
@@ -95,19 +95,14 @@ def test_local_capsule_attached_once_and_preserves_tool_calls(
         )
     )
     function_calls = [event for event in events if event.event == "copilotFunctionCall"]
-    assert len(function_calls) == 2
+    assert len(function_calls) == 1
 
     widget_extra_state = function_calls[0].data.extra_state
-    mcp_extra_state = function_calls[1].data.extra_state
 
     assert widget_extra_state is not None
     assert widget_extra_state["tool_calls"][0]["tool_call_id"] == "widget-1"
     assert widget_extra_state["tool_calls"][0]["tool_name"] == widget_tool_name
     assert LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY in widget_extra_state
-
-    assert mcp_extra_state is not None
-    assert mcp_extra_state["tool_calls"][0]["tool_call_id"] == "mcp-1"
-    assert LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY not in mcp_extra_state
 
     entries = unpack_tool_history(
         widget_extra_state[LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY]

@@ -19,6 +19,9 @@ LOCAL_TOOL_CAPSULE_EXTRA_STATE_KEY = "openbb_local_tool_capsule"
 LOCAL_TOOL_CAPSULE_REHYDRATED_KEY = "openbb_local_tool_rehydrated"
 LOCAL_TOOL_CAPSULE_RESULT_KEY = "openbb_local_tool_result"
 
+# Namespaced extra_state key carrying request context into follow-up requests,
+# which the Workspace sends without timezone, urls and workspace_state.
+CONTEXT_SNAPSHOT_EXTRA_STATE_KEY = "openbb_pydantic_ai_ctx"
 
 # Event type constants
 EVENT_TYPE_THINKING = "Thinking"

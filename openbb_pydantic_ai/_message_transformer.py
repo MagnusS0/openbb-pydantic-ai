@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
@@ -30,12 +29,12 @@ from openbb_pydantic_ai._config import (
     LOCAL_TOOL_CAPSULE_RESULT_KEY,
 )
 from openbb_pydantic_ai._serializers import serialize_result
-from openbb_pydantic_ai._utils import extract_tool_call_id
 
 # UI protocol function names that should be rewritten to `call_tools`
 _REWRITABLE_FUNCTIONS = frozenset({GET_WIDGET_DATA_TOOL_NAME, EXECUTE_MCP_TOOL_NAME})
 
 _CALL_TOOLS = "call_tools"
+_DERIVED_ID_PREFIX = "openbb-pair"
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +48,11 @@ class MessageTransformer:
     def transform_batch(self, messages: Sequence[LlmMessage]) -> list[ModelMessage]:
         """Transform a batch of OpenBB messages to Pydantic AI messages.
 
+        Function calls and results are paired by adjacency: the Workspace always
+        stores a call message immediately followed by its result message, and
+        history may contain other agents' pairs or pairs with a deleted half.
+        Unpaired halves are skipped so no orphan tool part reaches the model.
+
         Parameters
         ----------
         messages : Sequence[LlmMessage]
@@ -59,59 +63,93 @@ class MessageTransformer:
         list[ModelMessage]
             List of Pydantic AI messages
         """
-        tool_call_id_map = self._build_tool_call_id_map(messages)
         tool_name_map = self._build_tool_name_map(messages)
-        call_counters: dict[str, int] = {}
+        paired_ids = self._pair_function_calls(messages)
 
         builder = MessagesBuilder()
-        for message in messages:
+        for index, message in enumerate(messages):
             if isinstance(message, LlmClientMessage):
-                self._add_client_message(
-                    builder, message, tool_call_id_map, call_counters, tool_name_map
-                )
+                if isinstance(message.content, LlmClientFunctionCall):
+                    ids = paired_ids.get(index)
+                    if ids is None:
+                        logger.warning(
+                            "Skipping unpaired function call '%s' in history",
+                            message.content.function,
+                        )
+                        continue
+                    self._add_function_call(
+                        builder, message.content, ids, tool_name_map
+                    )
+                    continue
+                self._add_text_message(builder, message)
             elif isinstance(message, LlmClientFunctionCallResultMessage):
-                self._add_result_message(builder, message, tool_name_map)
+                ids = paired_ids.get(index)
+                if ids is None:
+                    logger.warning(
+                        "Skipping unpaired result message for '%s' in history",
+                        message.function,
+                    )
+                    continue
+                self._add_result_message(builder, message, ids, tool_name_map)
         return builder.messages
 
-    def _build_tool_call_id_map(
-        self, messages: Sequence[LlmMessage]
-    ) -> dict[str, list[str]]:
-        """Build a lookup of function_name -> all tool_call_ids in order.
+    @staticmethod
+    def _pair_function_calls(
+        messages: Sequence[LlmMessage],
+    ) -> dict[int, tuple[str, ...]]:
+        """Map the indices of each adjacent call/result pair to its tool_call_ids.
 
-        Since the same function (e.g., get_widget_data) can be called multiple times,
-        this accumulates ALL tool_call_ids for each function across all result messages,
-        preserving order. These IDs are consumed sequentially via a counter when
-        processing deferred tool calls.
-
-        Parameters
-        ----------
-        messages : Sequence[LlmMessage]
-            All messages to extract tool_call_ids from
-
-        Returns
-        -------
-        dict[str, list[str]]
-            Map of function names to ordered lists of tool_call_ids
+        IDs come from the result's `extra_state["tool_calls"]` (always attached by
+        this adapter). Pairs without them get a deterministic id derived from the
+        call's position, so both halves agree. Counting calls per function name
+        instead would shift ids whenever history holds other agents' pairs.
         """
-        id_map: defaultdict[str, list[str]] = defaultdict(list)
-
-        for msg in messages:
-            if not isinstance(msg, LlmClientFunctionCallResultMessage):
+        paired: dict[int, tuple[str, ...]] = {}
+        for index in range(len(messages) - 1):
+            call_message, result = messages[index], messages[index + 1]
+            if not (
+                isinstance(call_message, LlmClientMessage)
+                and isinstance(call_message.content, LlmClientFunctionCall)
+                and isinstance(result, LlmClientFunctionCallResultMessage)
+                and result.function == call_message.content.function
+            ):
                 continue
 
-            if (extra_state := msg.extra_state) and (
-                tool_calls := extra_state.get("tool_calls")
-            ):
-                # Extract tool_call_ids preserving order
-                ids = [
-                    tc["tool_call_id"]
-                    for tc in tool_calls
-                    if isinstance(tc, dict) and "tool_call_id" in tc
-                ]
-                if ids:
-                    id_map[msg.function].extend(ids)
+            function_name = call_message.content.function
+            data_sources = (call_message.content.input_arguments or {}).get(
+                "data_sources", []
+            )
+            required = (
+                len(data_sources)
+                if isinstance(data_sources, list) and len(data_sources) > 1
+                else 1
+            )
 
-        return dict(id_map)
+            extra_state = result.extra_state or {}
+            tool_calls = extra_state.get("tool_calls")
+            recorded_ids = [
+                tc["tool_call_id"]
+                for tc in (tool_calls if isinstance(tool_calls, list) else [])
+                if isinstance(tc, dict) and isinstance(tc.get("tool_call_id"), str)
+            ]
+            if not recorded_ids and isinstance(extra_state.get("tool_call_id"), str):
+                recorded_ids = [extra_state["tool_call_id"]]
+
+            if required > 1:
+                if len(recorded_ids) < required:
+                    logger.warning(
+                        "Not enough tool_call_ids for batched call to %s",
+                        function_name,
+                    )
+                    continue
+                ids = tuple(recorded_ids[:required])
+            elif recorded_ids:
+                ids = tuple(recorded_ids)
+            else:
+                ids = (f"{_DERIVED_ID_PREFIX}-{function_name}-{index}",)
+
+            paired[index] = paired[index + 1] = ids
+        return paired
 
     @staticmethod
     def _build_tool_name_map(messages: Sequence[LlmMessage]) -> dict[str, str]:
@@ -250,192 +288,87 @@ class MessageTransformer:
             and tool_call_id in tool_name_map
         )
 
-    def _add_client_message(
+    @staticmethod
+    def _add_text_message(builder: MessagesBuilder, message: LlmClientMessage) -> None:
+        content = message.content
+        if not isinstance(content, str):
+            return
+        if message.role == RoleEnum.human:
+            builder.add(UserPromptPart(content=content))
+        else:
+            builder.add(TextPart(content=content))
+
+    def _add_function_call(
         self,
         builder: MessagesBuilder,
-        message: LlmClientMessage,
-        tool_call_id_map: dict[str, list[str]],
-        call_counters: dict[str, int],
+        content: LlmClientFunctionCall,
+        tool_call_ids: tuple[str, ...],
         tool_name_map: dict[str, str],
     ) -> None:
-        """Add a client message to the builder.
+        """Add the call half of a pair; batched widget calls expand per source."""
+        function_name = content.function
+        input_args = content.input_arguments or {}
+        data_sources = input_args.get("data_sources", [])
 
-        Parameters
-        ----------
-        builder : MessagesBuilder
-            The message builder to add to
-        message : LlmClientMessage
-            The client message to add
-        tool_call_id_map : dict[str, list[str]]
-            Prebuilt map of function names to tool_call_ids
-        call_counters : dict[str, int]
-            Counter tracking which tool_call_id index to use per function
-        tool_name_map : dict[str, str]
-            Map of tool_call_id to pydantic-ai tool name for rewriting
-        """
-        content = message.content
-
-        if isinstance(content, LlmClientFunctionCall):
-            function_name = content.function
-            tool_call_ids = tool_call_id_map.get(function_name, [])
-
-            input_args = content.input_arguments or {}
-            data_sources = input_args.get("data_sources", [])
-
-            if isinstance(data_sources, list) and len(data_sources) > 1:
-                counter = call_counters.get(function_name, 0)
-                required = len(data_sources)
-                if counter + required > len(tool_call_ids):
-                    logger.warning(
-                        "Not enough tool_call_ids for batched call to %s",
-                        function_name,
-                    )
-                    return
-
-                for i, data_source in enumerate(data_sources):
-                    tc_id = tool_call_ids[counter + i]
-                    source_args: dict[str, Any] = {"data_sources": [data_source]}
-                    rewritten_name, rewritten_args = self._rewrite_tool_call(
-                        function_name, tc_id, source_args, tool_name_map
-                    )
-
-                    builder.add(
-                        ToolCallPart(
-                            tool_name=rewritten_name,
-                            tool_call_id=tc_id,
-                            args=rewritten_args,
-                        )
-                    )
-
-                call_counters[function_name] = counter + required
-                return
-
-            counter = call_counters.get(function_name, 0)
-            if counter >= len(tool_call_ids):
-                logger.warning(
-                    "`tool_call_id` is required for deferred tool calls "
-                    "but not enough IDs were found in prior result messages"
+        if isinstance(data_sources, list) and len(data_sources) > 1:
+            for tc_id, data_source in zip(tool_call_ids, data_sources, strict=True):
+                rewritten_name, rewritten_args = self._rewrite_tool_call(
+                    function_name,
+                    tc_id,
+                    {"data_sources": [data_source]},
+                    tool_name_map,
                 )
-                return
-            tool_call_id = tool_call_ids[counter]
-            call_counters[function_name] = counter + 1
-
-            rewritten_name, rewritten_args = self._rewrite_tool_call(
-                content.function, tool_call_id, content.input_arguments, tool_name_map
-            )
-
-            builder.add(
-                ToolCallPart(
-                    tool_name=rewritten_name,
-                    tool_call_id=tool_call_id,
-                    args=rewritten_args,
+                builder.add(
+                    ToolCallPart(
+                        tool_name=rewritten_name,
+                        tool_call_id=tc_id,
+                        args=rewritten_args,
+                    )
                 )
-            )
             return
 
-        if isinstance(content, str):
-            if message.role == RoleEnum.human:
-                builder.add(UserPromptPart(content=content))
-            elif message.role in (RoleEnum.ai, RoleEnum.tool):
-                builder.add(TextPart(content=content))
-            else:
-                builder.add(TextPart(content=content))
+        tool_call_id = tool_call_ids[0]
+        rewritten_name, rewritten_args = self._rewrite_tool_call(
+            function_name, tool_call_id, content.input_arguments, tool_name_map
+        )
+        builder.add(
+            ToolCallPart(
+                tool_name=rewritten_name,
+                tool_call_id=tool_call_id,
+                args=rewritten_args,
+            )
+        )
 
     def _add_result_message(
         self,
         builder: MessagesBuilder,
         message: LlmClientFunctionCallResultMessage,
+        tool_call_ids: tuple[str, ...],
         tool_name_map: dict[str, str] | None = None,
     ) -> None:
-        """Add a function call result message to the builder.
-
-        For batched results (detected by extra_state.tool_calls array), unbatch
-        them into individual ToolReturnPart messages, one per tool call.
-
-        Parameters
-        ----------
-        builder : MessagesBuilder
-            The message builder to add to
-        message : LlmClientFunctionCallResultMessage
-            The result message to add
-        tool_name_map : dict[str, str] | None
-            Map of tool_call_id to pydantic-ai tool name for rewriting
-        """
-        extra_state = message.extra_state or {}
-        tool_calls = extra_state.get("tool_calls", [])
-
-        if isinstance(tool_calls, list) and len(tool_calls) > 1:
-            self._add_unbatched_results(builder, message, tool_name_map)
+        """Add the result half of a pair, unbatching `data[i]` per tool_call_id."""
+        if len(tool_call_ids) > 1:
+            data = message.data or []
+            for idx, tool_call_id in enumerate(tool_call_ids):
+                builder.add(
+                    ToolReturnPart(
+                        tool_name=self._result_tool_name(
+                            message, tool_call_id, tool_name_map
+                        ),
+                        tool_call_id=tool_call_id,
+                        content=data[idx] if idx < len(data) else None,
+                    )
+                )
             return
 
-        try:
-            tool_call_id = extract_tool_call_id(message)
-        except ValueError as exc:
-            logger.warning(
-                "Skipping result message for '%s': %s",
-                message.function,
-                exc,
-            )
-            return
-        result_tool_name = self._result_tool_name(message, tool_call_id, tool_name_map)
-
-        result_content = self._result_content(message)
+        tool_call_id = tool_call_ids[0]
         builder.add(
             ToolReturnPart(
-                tool_name=result_tool_name,
+                tool_name=self._result_tool_name(message, tool_call_id, tool_name_map),
                 tool_call_id=tool_call_id,
-                content=result_content,
+                content=self._result_content(message),
             )
         )
-
-    def _add_unbatched_results(
-        self,
-        builder: MessagesBuilder,
-        message: LlmClientFunctionCallResultMessage,
-        tool_name_map: dict[str, str] | None = None,
-    ) -> None:
-        """Unbatch a result with multiple tool_calls into individual ToolReturnParts.
-
-        Matches data[i] with tool_calls[i] to preserve tool_call_id association.
-        This handles batched widget calls (get_widget_data) or any other
-        batched tool types.
-
-        Parameters
-        ----------
-        builder : MessagesBuilder
-            The message builder to add to
-        message : LlmClientFunctionCallResultMessage
-            The batched result message
-        tool_name_map : dict[str, str] | None
-            Map of tool_call_id to pydantic-ai tool name for rewriting
-        """
-        extra_state = message.extra_state or {}
-        tool_calls = extra_state.get("tool_calls", [])
-        data = message.data or []
-
-        for idx, tool_call_info in enumerate(tool_calls):
-            if not isinstance(tool_call_info, dict):
-                continue
-
-            tool_call_id = tool_call_info.get("tool_call_id")
-            if not isinstance(tool_call_id, str):
-                continue
-
-            result_data = data[idx] if idx < len(data) else None
-
-            result_tool_name = self._result_tool_name(
-                message,
-                tool_call_id,
-                tool_name_map,
-            )
-
-            builder.add(
-                ToolReturnPart(
-                    tool_name=result_tool_name,
-                    tool_call_id=tool_call_id,
-                    content=result_data,
-                )
-            )
 
     @staticmethod
     def _result_content(message: LlmClientFunctionCallResultMessage) -> Any:
