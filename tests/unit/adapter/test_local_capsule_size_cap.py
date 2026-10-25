@@ -40,6 +40,21 @@ def test_pack_drops_oldest_entries_to_fit_unpack_limit(caplog) -> None:
     assert "dropped" in caplog.text
 
 
+def test_pack_drops_entries_exceeding_unpacked_limit(caplog) -> None:
+    # Highly compressible results fit MAX_PACKED_SIZE but not MAX_UNPACKED_SIZE.
+    entries = [
+        LocalToolEntry(tool_call_id=f"call-{i}", tool_name="tool", result="a" * 900_000)
+        for i in range(3)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger=capsule.__name__):
+        packed = pack_tool_history(entries)
+
+    restored = unpack_tool_history(packed)
+    assert [e.tool_call_id for e in restored] == ["call-1", "call-2"]
+    assert "dropped 1 oldest" in caplog.text
+
+
 def test_pack_small_payload_is_untouched(caplog) -> None:
     entries = [_entry(0, 100)]
 

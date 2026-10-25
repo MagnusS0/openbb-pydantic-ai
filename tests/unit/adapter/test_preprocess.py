@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openbb_ai.models import LlmClientMessage, RoleEnum
+from pydantic import ValidationError
 from pydantic_ai.ui import DEFAULT_ALLOWED_CONTENT_TYPES
 
 from openbb_pydantic_ai import OpenBBAIAdapter
@@ -129,3 +130,25 @@ def test_build_run_input_drops_unsupported_widget_param_types() -> None:
     assert run_input.widgets is not None
     params = run_input.widgets.secondary[0].params
     assert [p.name for p in params] == ["symbol"]
+
+
+def test_build_run_input_rejects_non_string_param_type_with_validation_error() -> None:
+    body = json.dumps(
+        {
+            "messages": [{"role": "human", "content": "hi"}],
+            "widgets": {
+                "secondary": [
+                    {
+                        "origin": "o",
+                        "widget_id": "w",
+                        "name": "W",
+                        "description": "d",
+                        "params": [{"name": "bad", "type": ["x"], "description": "d"}],
+                    }
+                ]
+            },
+        }
+    ).encode()
+
+    with pytest.raises(ValidationError):
+        OpenBBAIAdapter.build_run_input(body)

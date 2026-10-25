@@ -113,7 +113,7 @@ def _sanitize_widget_params(body: bytes) -> Any:
             for param in params:
                 if (
                     isinstance(param, dict)
-                    and "type" in param
+                    and isinstance(param.get("type"), str)
                     and param["type"] not in _SUPPORTED_WIDGET_PARAM_TYPES
                 ):
                     logger.debug(

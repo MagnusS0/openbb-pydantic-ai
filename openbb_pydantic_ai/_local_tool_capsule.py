@@ -58,20 +58,25 @@ class LocalToolState(BaseModel):
 def pack_tool_history(entries: Sequence[LocalToolEntry]) -> str:
     """Serialize tool entries into a compact ASCII payload.
 
-    Oldest entries are dropped until the payload fits ``MAX_PACKED_SIZE`` so the
-    result can always be unpacked again.
+    Oldest entries are dropped until the payload fits both ``MAX_PACKED_SIZE``
+    and ``MAX_UNPACKED_SIZE`` so the result can always be unpacked again.
     """
     kept = list(entries)
-    packed = LocalToolState(entries=kept).pack()
     dropped = 0
-    while len(packed) > MAX_PACKED_SIZE and kept:
+    while True:
+        state = LocalToolState(entries=kept)
+        if len(state.model_dump_json()) <= MAX_UNPACKED_SIZE:
+            packed = state.pack()
+            if len(packed) <= MAX_PACKED_SIZE or not kept:
+                break
+        elif not kept:
+            packed = state.pack()
+            break
         kept.pop(0)
         dropped += 1
-        packed = LocalToolState(entries=kept).pack()
     if dropped:
         logger.warning(
-            "Local tool capsule exceeded %d chars; dropped %d oldest entries.",
-            MAX_PACKED_SIZE,
+            "Local tool capsule exceeded its size limits; dropped %d oldest entries.",
             dropped,
         )
     return packed
