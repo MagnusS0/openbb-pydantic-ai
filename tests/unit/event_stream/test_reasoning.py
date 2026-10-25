@@ -7,6 +7,7 @@ from openbb_ai.models import (
     RoleEnum,
     StatusUpdateSSE,
 )
+from pydantic_ai.exceptions import RunCancelled
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -159,13 +160,13 @@ def test_error_strings_from_tool_results_emit_status_updates(make_request) -> No
     error_updates = [
         e
         for e in events
-        if isinstance(e, StatusUpdateSSE) and e.data.eventType == "ERROR"
+        if isinstance(e, StatusUpdateSSE) and e.data.eventType == "WARNING"
     ]
     assert error_updates
     assert not any(isinstance(e, MessageChunkSSE) for e in events)
 
 
-def test_retried_tool_result_emits_error_step(make_request) -> None:
+def test_retried_tool_result_emits_warning_step(make_request) -> None:
     request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
     stream = OpenBBAIEventStream(run_input=request)
 
@@ -182,4 +183,90 @@ def test_retried_tool_result_emits_error_step(make_request) -> None:
     assert len(events) == 1
     assert isinstance(events[0], StatusUpdateSSE)
     assert events[0].data.message == "Invalid arguments, try again"
-    assert events[0].data.eventType == "ERROR"
+    assert events[0].data.eventType == "WARNING"
+
+
+def _status_types(events) -> list[str]:
+    return [e.data.eventType for e in events if isinstance(e, StatusUpdateSSE)]
+
+
+async def _collect_async(stream_iter) -> list:
+    return [event async for event in stream_iter]
+
+
+def test_retry_never_emits_error_status(make_request) -> None:
+    """The Workspace deletes the latest tool pair on any ERROR status update."""
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    events = collect_events(
+        stream.handle_function_tool_result(
+            FunctionToolResultEvent(
+                part=ToolReturnPart(
+                    tool_name="internal_tool",
+                    tool_call_id="tool-retry",
+                    content="Invalid arguments, try again",
+                    outcome="retried",
+                )
+            )
+        )
+    )
+
+    assert _status_types(events) == ["WARNING"]
+
+
+async def test_terminal_failure_still_emits_error_status(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    events = await _collect_async(stream.on_error(RuntimeError("boom")))
+
+    assert _status_types(events) == ["ERROR"]
+    assert events[0].data.message == "boom"
+
+
+async def test_cancellation_emits_warning_not_error(make_request) -> None:
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request)
+
+    events = await _collect_async(stream.on_cancelled(RunCancelled("Run cancelled")))
+
+    assert _status_types(events) == ["WARNING"]
+
+
+@pytest.mark.parametrize("outcome", ["failed", "interrupted", "denied"])
+def test_unsuccessful_tool_outcomes_warn_and_skip_citations(
+    outcome, widget_collection, make_request
+) -> None:
+    widget = widget_collection.primary[0]
+    tool_name = build_widget_tool_name(widget)
+    registry = WidgetRegistry(collection=widget_collection)
+    request = make_request([LlmClientMessage(role=RoleEnum.human, content="Hi")])
+    stream = OpenBBAIEventStream(run_input=request, widget_registry=registry)
+    collect_events(
+        stream.handle_function_tool_call(
+            FunctionToolCallEvent(
+                part=ToolCallPart(
+                    tool_name=tool_name,
+                    tool_call_id="call-1",
+                    args={"symbol": "AAPL"},
+                )
+            )
+        )
+    )
+
+    events = collect_events(
+        stream.handle_function_tool_result(
+            FunctionToolResultEvent(
+                part=ToolReturnPart(
+                    tool_name=tool_name,
+                    tool_call_id="call-1",
+                    content=f"tool {outcome}",
+                    outcome=outcome,
+                )
+            )
+        )
+    )
+
+    assert _status_types(events) == ["WARNING"]
+    assert stream._state.citations == []

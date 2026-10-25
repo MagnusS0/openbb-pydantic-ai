@@ -23,7 +23,7 @@ from pydantic_core import from_json as _from_json
 from openbb_pydantic_ai._viz_toolsets import _html_artifact
 
 from ._config import (
-    EVENT_TYPE_ERROR,
+    EVENT_TYPE_WARNING,
     GET_WIDGET_DATA_TOOL_NAME,
     MAX_NESTED_JSON_DECODE_DEPTH,
     MAX_TABLE_PARSE_DEPTH,
@@ -444,7 +444,7 @@ def _process_error_result(entry: dict[str, Any]) -> SSE | None:
     if error_type and content:
         return StatusUpdateSSE(
             data=StatusUpdateSSEData(
-                eventType="ERROR",
+                eventType=EVENT_TYPE_WARNING,
                 message=str(content),
                 details=[{"error_type": error_type}],
             )
@@ -575,7 +575,7 @@ def _parse_item_content(
         if error_messages:
             return None, StatusUpdateSSE(
                 data=StatusUpdateSSEData(
-                    eventType=EVENT_TYPE_ERROR,
+                    eventType=EVENT_TYPE_WARNING,
                     message=error_messages[0],
                     details=[{"errors": error_messages}],
                 )
@@ -583,7 +583,7 @@ def _parse_item_content(
 
         return None, StatusUpdateSSE(
             data=StatusUpdateSSEData(
-                eventType="WARNING",
+                eventType=EVENT_TYPE_WARNING,
                 message=f"Failed to parse content for '{display_name}'",
                 details=[{"name": display_name}],
             )
@@ -600,7 +600,7 @@ def _item_to_artifact(
     if error_messages:
         return [], StatusUpdateSSE(
             data=StatusUpdateSSEData(
-                eventType=EVENT_TYPE_ERROR,
+                eventType=EVENT_TYPE_WARNING,
                 message=error_messages[0],
                 details=[{"errors": error_messages}],
             )

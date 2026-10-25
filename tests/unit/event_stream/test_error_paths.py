@@ -29,7 +29,7 @@ def test_tool_result_events_surface_function_call_errors() -> None:
     status_event = cast(StatusUpdateSSE, events[0])
     status_data = status_event.data
     assert status_event.event == "copilotStatusUpdate"
-    assert status_data.eventType == "ERROR"
+    assert status_data.eventType == "WARNING"
     assert status_data.message == "Widget failed to load because the symbol was invalid"
     assert status_data.details
     details = cast(list[dict[str, Any]], status_data.details)
@@ -89,7 +89,7 @@ def test_tool_result_events_handle_list_of_strings(
         status_event = cast(StatusUpdateSSE, event)
         status_data = status_event.data
         assert status_event.event == "copilotStatusUpdate"
-        assert status_data.eventType == "ERROR"
+        assert status_data.eventType == "WARNING"
         assert expected_message in status_data.message
         assert status_data.details
         details_list = cast(list[dict[str, Any]], status_data.details)
