@@ -32,7 +32,8 @@ def test_tool_result_events_surface_function_call_errors() -> None:
     assert status_data.eventType == "ERROR"
     assert status_data.message == "Widget failed to load because the symbol was invalid"
     assert status_data.details
-    assert status_data.details[0]["error_type"] == "widget_error"
+    details = cast(list[dict[str, Any]], status_data.details)
+    assert details[0]["error_type"] == "widget_error"
 
 
 @pytest.mark.parametrize(

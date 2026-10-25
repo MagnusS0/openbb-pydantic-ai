@@ -274,6 +274,50 @@ def test_execute_agent_tool_rewrite_uses_inner_parameters(make_request) -> None:
     assert returns[0].tool_name == "call_tools"
 
 
+@pytest.mark.parametrize(
+    "include_tool_name_in_extra_state",
+    [True, False],
+    ids=["metadata_tool_name", "input_arguments_tool_name"],
+)
+def test_execute_agent_tool_unwraps_to_direct_mcp_tool_when_discovery_disabled(
+    make_request,
+    include_tool_name_in_extra_state: bool,
+) -> None:
+    mcp_tool_name = "database-connector_show_tables"
+    wrapped_args = {
+        "server_id": "server-1",
+        "tool_name": mcp_tool_name,
+        "parameters": {
+            "database": "beer_factory",
+        },
+    }
+    tool_call_entry = {"tool_call_id": "call-mcp-1"}
+    if include_tool_name_in_extra_state:
+        tool_call_entry["tool_name"] = mcp_tool_name
+
+    call_message, result_message = _build_call_and_result(
+        function=EXECUTE_MCP_TOOL_NAME,
+        input_arguments=wrapped_args,
+        tool_calls=[tool_call_entry],
+    )
+
+    adapter = OpenBBAIAdapter(
+        agent=MagicMock(),
+        run_input=make_request([call_message, result_message]),
+        enable_progressive_tool_discovery=False,
+    )
+
+    calls = tool_call_parts(adapter)
+    returns = tool_return_parts(adapter)
+
+    assert len(calls) == 1
+    assert calls[0].tool_name == mcp_tool_name
+    assert calls[0].args == wrapped_args["parameters"]
+
+    assert len(returns) == 1
+    assert returns[0].tool_name == mcp_tool_name
+
+
 def test_rewrite_is_gated_by_tool_call_id_mapping(
     widget_collection, make_request
 ) -> None:

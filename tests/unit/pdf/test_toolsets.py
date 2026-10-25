@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from inline_snapshot import snapshot
 from pydantic_ai import ToolReturn
@@ -90,7 +90,7 @@ def test_pdf_query_read_pages_emits_tool_return_with_citation(mocker) -> None:
     assert isinstance(result, ToolReturn)
     assert result.return_value == "### Page 2\n\ncontent"
     assert isinstance(result.metadata, dict)
-    citations = result.metadata.get("citations")
+    citations = cast(dict[str, Any], result.metadata).get("citations")
     assert isinstance(citations, list)
     assert len(citations) == 1
     assert citations[0].quote_bounding_boxes
@@ -146,7 +146,7 @@ def test_pdf_query_resolves_alias_doc_id_for_citations(mocker) -> None:
 
     assert isinstance(result, ToolReturn)
     assert isinstance(result.metadata, dict)
-    citations = result.metadata.get("citations")
+    citations = cast(dict[str, Any], result.metadata).get("citations")
     assert isinstance(citations, list)
     assert citations
     assert citations[0].source_info.metadata["doc_id"] == "canonical-doc-id"
@@ -224,9 +224,9 @@ def test_pdf_query_read_section_by_index(mocker) -> None:
     result = _pdf_query(None, params)  # type: ignore[arg-type]
 
     assert isinstance(result, ToolReturn)
-    assert "Methods" in result.return_value
+    assert "Methods" in cast(str, result.return_value)
     assert isinstance(result.metadata, dict)
-    citations = result.metadata.get("citations")
+    citations = cast(dict[str, Any], result.metadata).get("citations")
     assert isinstance(citations, list)
     assert citations[0].source_info.type == "direct retrieval"
 
