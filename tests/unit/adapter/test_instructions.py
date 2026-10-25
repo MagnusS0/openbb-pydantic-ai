@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -163,3 +164,19 @@ def test_adapter_dashboard_orphaned_widgets(make_request, human_message):
 
     assert "Other Available Widgets:" in content
     assert "- W2" in content
+
+
+def test_instructions_time_is_minute_granularity(make_request, human_message):
+    request = make_request([human_message], timezone="America/New_York")
+    adapter = OpenBBAIAdapter(agent=MagicMock(), run_input=request)
+
+    line = next(
+        line
+        for line in adapter.instructions.splitlines()
+        if line.startswith("Current date and time: ")
+    )
+    stamp = line.removeprefix("Current date and time: ")
+
+    assert datetime.fromisoformat(stamp).second == 0
+    assert datetime.fromisoformat(stamp).microsecond == 0
+    assert len(stamp.split("T")[1].split("-")[0]) == len("HH:MM")

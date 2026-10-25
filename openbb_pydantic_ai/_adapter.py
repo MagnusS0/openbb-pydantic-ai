@@ -14,6 +14,7 @@ from typing import (
     Literal,
     Protocol,
     cast,
+    get_args,
     runtime_checkable,
 )
 from zoneinfo import ZoneInfo
@@ -32,6 +33,7 @@ from openbb_ai.models import (
     Undefined,
     Widget,
     WidgetCollection,
+    WidgetParam,
 )
 from pydantic import ValidationError
 from pydantic_ai import CancellationToken
@@ -52,6 +54,7 @@ from pydantic_ai.ui import (
 from pydantic_ai.ui._adapter import _check_content_type
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
+from pydantic_core import from_json
 from typing_extensions import override
 
 from openbb_pydantic_ai._config import (
@@ -83,6 +86,45 @@ if TYPE_CHECKING:
     from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+_SUPPORTED_WIDGET_PARAM_TYPES: frozenset[str] = frozenset(
+    get_args(WidgetParam.model_fields["type"].annotation)
+)
+
+
+def _sanitize_widget_params(body: bytes) -> Any:
+    """Drop widget params whose type the SDK model cannot represent.
+
+    The Workspace may send params (e.g. ``button``) that ``openbb_ai`` rejects,
+    which would otherwise fail validation of the whole request.
+    """
+    data = from_json(body)
+    widgets = data.get("widgets") if isinstance(data, dict) else None
+    if not isinstance(widgets, dict):
+        return data
+    for group in widgets.values():
+        if not isinstance(group, list):
+            continue
+        for widget in group:
+            params = widget.get("params") if isinstance(widget, dict) else None
+            if not isinstance(params, list):
+                continue
+            kept = []
+            for param in params:
+                if (
+                    isinstance(param, dict)
+                    and "type" in param
+                    and param["type"] not in _SUPPORTED_WIDGET_PARAM_TYPES
+                ):
+                    logger.debug(
+                        "Dropping unsupported widget param '%s' of type '%s'",
+                        param.get("name"),
+                        param["type"],
+                    )
+                    continue
+                kept.append(param)
+            widget["params"] = kept
+    return data
 
 
 @runtime_checkable
@@ -152,7 +194,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
     @classmethod
     def build_run_input(cls, body: bytes) -> QueryRequest:
         """Parse the raw request body into a ``QueryRequest`` instance."""
-        return QueryRequest.model_validate_json(body)
+        return QueryRequest.model_validate(_sanitize_widget_params(body))
 
     @classmethod
     async def from_request(
@@ -641,7 +683,9 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
 
         if self.deps.timezone:
             lines.append(f"The user is in timezone: {self.deps.timezone}")
-            current_time = datetime.now(ZoneInfo(self.deps.timezone)).isoformat()
+            current_time = datetime.now(ZoneInfo(self.deps.timezone)).isoformat(
+                timespec="minutes"
+            )
             lines.append(f"Current date and time: {current_time}")
 
         if self.deps.context:
@@ -981,6 +1025,7 @@ class OpenBBAIAdapter(UIAdapter[QueryRequest, LlmMessage, SSE, OpenBBDeps, Any])
                 capabilities=capabilities,
                 workspace=workspace,
                 on_complete=on_complete,
+                on_cancel=on_cancel,
             ),
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -83,3 +84,48 @@ async def test_dispatch_request_uses_from_request(mocker) -> None:
     adapter.run_stream.assert_called_once()
     adapter.streaming_response.assert_called_once_with(stream)
     assert result is response
+
+
+async def test_dispatch_request_forwards_on_cancel(mocker) -> None:
+    adapter = MagicMock()
+    mocker.patch.object(
+        OpenBBAIAdapter,
+        "from_request",
+        new_callable=AsyncMock,
+        return_value=adapter,
+    )
+    on_cancel = MagicMock()
+
+    await OpenBBAIAdapter.dispatch_request(
+        MagicMock(), agent=MagicMock(), on_cancel=on_cancel
+    )
+
+    assert adapter.run_stream.call_args.kwargs["on_cancel"] is on_cancel
+
+
+def test_build_run_input_drops_unsupported_widget_param_types() -> None:
+    body = json.dumps(
+        {
+            "messages": [{"role": "human", "content": "hi"}],
+            "widgets": {
+                "secondary": [
+                    {
+                        "origin": "o",
+                        "widget_id": "w",
+                        "name": "W",
+                        "description": "d",
+                        "params": [
+                            {"name": "run", "type": "button", "description": "go"},
+                            {"name": "symbol", "type": "text", "description": "s"},
+                        ],
+                    }
+                ]
+            },
+        }
+    ).encode()
+
+    run_input = OpenBBAIAdapter.build_run_input(body)
+
+    assert run_input.widgets is not None
+    params = run_input.widgets.secondary[0].params
+    assert [p.name for p in params] == ["symbol"]
